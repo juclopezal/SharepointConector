@@ -1,7 +1,7 @@
 # Tecnologías utilizadas — SharePoint Connector
 
-**Versión:** 2.2.1  
-**Fecha:** 2026-06-11  
+**Versión:** 2.3.0  
+**Fecha:** 2026-06-18  
 **Autor:** Juan Camilo López Alzate — Latinia  
 
 ---
@@ -325,6 +325,13 @@ Content-Type: application/json
 }
 ```
 A diferencia de la creación (`POST .../items`), el `PATCH` apunta al subrecurso `/fields` del ítem y el cuerpo es el conjunto de campos **sin** el wrapper `{"fields": {...}}`. Devuelve el `fieldValueSet` actualizado.
+
+#### Búsqueda combinada para el upsert (clave + periodo)
+```
+GET .../items?$expand=fields&$filter=fields/{clave} eq '{valor}' and fields/{fecha} ge '{inicio}' and fields/{fecha} lt '{fin}'
+Prefer: HonorNonIndexedQueriesWarningMayFailRandomly
+```
+El endpoint `:upsert` extiende el `$filter` anterior con un **rango de fecha** opcional sobre una columna de tipo Fecha (`Created`, `Modified` o una propia). Las columnas de fecha de Graph se almacenan y comparan en **UTC**, así que los límites del periodo se calculan primero en la **zona horaria del tenant** (`TENANT_TIMEZONE`, IANA, vía `zoneinfo`/`tzdata`) y luego se convierten a UTC con formato `YYYY-MM-DDTHH:MM:SSZ`. El intervalo es **semiabierto** (`ge` inicio, `lt` fin) para que periodos contiguos no se solapen. Los nombres de columna se validan contra `[A-Za-z0-9_]+` (anti-inyección OData) y la expresión completa se percent-encodea.
 
 ### Caché de IDs
 

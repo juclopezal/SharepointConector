@@ -1,8 +1,8 @@
 # SPEC-003: Upsert de ítems de lista (verificar-y-decidir)
 
-> **Estado:** Aprobada — lista para implementar. Decisiones de negocio cerradas;
-> quedan puntos técnicos a validar en implementación (ver Riesgos). Código aún
-> no escrito.
+> **Estado:** ✅ Implementada (v2.3.0). Todos los criterios de aceptación
+> cubiertos. Ver la **Bitácora de IA** al final para detalle de archivos,
+> decisiones y resolución de los riesgos abiertos.
 
 ## 1. Contexto (El Problema)
 
@@ -181,6 +181,55 @@ convierte a UTC antes de consultar).
 
 ## 4. Bitácora de IA / Historial de Implementación
 
-_Pendiente. Aún no implementado. Cada agente o desarrollador que aborde esta
-spec debe añadir aquí su entrada (fecha, rol, archivos modificados, decisiones
-clave y desviaciones) al completar la implementación._
+### 2026-06-18 — Agente LLM (Claude Opus 4.8)
+
+Implementación completa de la SPEC. Versión `2.2.1 → 2.3.0`.
+
+**Endpoint añadido:** `POST /v1/sharepoint/list/item:upsert` (capa by-URL, junto al
+`POST`/`PATCH` existentes, que permanecen intactos). FastAPI enruta el segmento
+literal con `:` sin problema.
+
+**Archivos de código:**
+- `app/services/period.py` *(nuevo)* — `resolve_period(period, tz_name)`: traduce el
+  `period` (atajo con nombre o rango explícito `from`/`to`) a un par
+  `(inicio_utc, fin_utc)` en formato Graph. Calcula los límites en la zona horaria
+  del tenant (`zoneinfo`) y los convierte a UTC. Intervalo **semiabierto** (`ge`/`lt`);
+  `to` del rango explícito es **inclusive** (llega al inicio del día siguiente). Atajos:
+  `current_day`, `current_week` (semana ISO, lunes), `current_month`, `current_year`.
+- `app/services/sharepoint.py` — nuevo método `find_list_items_for_upsert(...)`: construye
+  el `$filter` combinado (clave `eq` **and** rango de fecha opcional), reutilizando el
+  patrón ya existente (validación `[A-Za-z0-9_]+` de nombres de campo, escape OData del
+  valor, percent-encode, cabecera `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly`,
+  paginación `_get_all`). Reutiliza `create_list_item` y `update_list_item` sin escritura
+  nueva de bajo nivel.
+- `app/schemas/sharepoint.py` — `ExplicitPeriod` (`from`/`to`, alias para la palabra
+  reservada), `UpsertMatch` (con `key_field`/`date_field` validados por `pattern` y un
+  `model_validator` que exige `date_field` cuando hay `period`), `UpsertListItemRequest`,
+  `UpsertListItemResponse` (`result`, `id`, `webUrl`, `site_id`, `list_id`, `matched`).
+- `app/api/v1/endpoints/sharepoint.py` — orquestación: resolver URL → resolver `period` →
+  buscar → crear (0) / actualizar primero (≥1) con `warning` si >1.
+- `app/core/config.py` — setting `tenant_timezone` (default `UTC`).
+- `requirements.txt` — `tzdata` (necesario para `zoneinfo` en Windows/imágenes slim).
+
+**Tests** (`pytest`: 76 passed): `tests/test_period.py` (10), y nuevos casos en
+`tests/test_sharepoint_endpoints.py` (created / updated+period / empate múltiple /
+`422` period sin date_field / rango explícito→UTC / key_field inválido) y
+`tests/test_sharepoint_service.py` (filtro solo-clave / clave+periodo / validación de
+nombres). Cubre los tres desenlaces (alta, actualización, empate).
+
+**Resolución de los riesgos/cuestiones abiertas:**
+- *Zona horaria del tenant:* se resuelve por **configuración** (`TENANT_TIMEZONE`, IANA,
+  default `UTC`) en vez de consultarla a Graph. Razón: es fiable, sin coste de red ni
+  dependencia de los regional settings del sitio, y explícito para operaciones. Si en el
+  futuro se quiere derivar del sitio, `resolve_period` ya aísla el cálculo.
+- *Columnas no indexadas:* se mantiene la cabecera `Prefer: HonorNonIndexed...`; la
+  recomendación operativa de indexar las columnas clave/fecha queda documentada.
+- *Contrato:* se confirman los nombres `match`/`key_field`/`key_value`/`date_field`/`period`
+  y el catálogo de atajos (`current_day|week|month|year`).
+- *Concurrencia:* no se aborda en código (la lista no garantiza unicidad); el `warning`
+  ante múltiples coincidencias permite detectar duplicados a posteriori.
+
+**Desviaciones respecto al borrador:** el campo de resultado de la respuesta se llama
+`result` (`created`/`updated`) tal como pide la SPEC; se añadió además `matched` (nº de
+coincidencias) como ayuda de observabilidad, no contemplado explícitamente en el borrador
+pero alineado con el objetivo de detectar duplicados.

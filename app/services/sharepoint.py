@@ -266,6 +266,71 @@ class SharePointService:
         )
         return items
 
+    async def find_list_items_for_upsert(
+        self,
+        site_id: str,
+        list_id: str,
+        *,
+        key_field: str,
+        key_value: str,
+        date_field: str | None = None,
+        period_start: str | None = None,
+        period_end: str | None = None,
+    ) -> list[dict]:
+        """Busca coincidencias para el upsert: clave **y**, si se indica, periodo.
+
+        Combina con ``and`` dos condiciones sobre la lista:
+
+        1. **Clave** — igualdad exacta ``fields/{key_field} eq '{key_value}'``.
+        2. **Periodo** (opcional) — rango sobre una columna de fecha:
+           ``fields/{date_field} ge '{inicio}' and fields/{date_field} lt '{fin}'``.
+           Solo se aplica si ``date_field`` y ambos límites están presentes; si no,
+           la coincidencia es **solo por clave**.
+
+        Los nombres de campo se validan contra ``[A-Za-z0-9_]+`` (anti-inyección
+        OData), el valor de la clave se escapa según OData y la expresión completa
+        se percent-encodea. Se envía ``Prefer: HonorNonIndexedQueriesWarningMayFailRandomly``
+        porque las columnas clave/fecha pueden no estar indexadas.
+        """
+        if not _FIELD_NAME_RE.match(key_field):
+            raise GraphAPIError(
+                400,
+                f"Nombre de campo clave inválido: {key_field!r}. Debe ser el nombre "
+                "interno de la columna (solo letras, dígitos y '_').",
+            )
+
+        escaped = key_value.replace("'", "''")
+        clauses = [f"fields/{key_field} eq '{escaped}'"]
+
+        if date_field and period_start and period_end:
+            if not _FIELD_NAME_RE.match(date_field):
+                raise GraphAPIError(
+                    400,
+                    f"Nombre de campo de fecha inválido: {date_field!r}. Debe ser el "
+                    "nombre interno de la columna (solo letras, dígitos y '_').",
+                )
+            clauses.append(f"fields/{date_field} ge '{period_start}'")
+            clauses.append(f"fields/{date_field} lt '{period_end}'")
+
+        flt = quote(" and ".join(clauses), safe="")
+        url = (
+            f"{GRAPH}/sites/{site_id}/lists/{list_id}/items"
+            f"?$expand=fields&$filter={flt}"
+        )
+        items = await self._get_all(
+            url, extra_headers={"Prefer": "HonorNonIndexedQueriesWarningMayFailRandomly"}
+        )
+        logger.info(
+            "Upsert lookup on list %s by %s=%r (period=%s) → %d match(es)",
+            list_id,
+            key_field,
+            key_value,
+            f"{period_start}..{period_end}" if period_start else "none",
+            len(items),
+            extra={**_ctx(), "site_id": site_id, "list_id": list_id},
+        )
+        return items
+
     async def update_list_item(
         self, site_id: str, list_id: str, item_id: str, fields: dict
     ) -> dict:

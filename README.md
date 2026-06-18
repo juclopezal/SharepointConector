@@ -2,7 +2,7 @@
 
 Microservicio REST que reemplaza Power Automate para operaciones sobre SharePoint vía Microsoft Graph API. Expone una API genérica y versionada que opera sobre cualquier site, lista y biblioteca de documentos de forma dinámica.
 
-**Versión actual:** 2.2.1
+**Versión actual:** 2.3.0
 
 ---
 
@@ -21,6 +21,7 @@ Ver [ARQUITECTURA.md](ARQUITECTURA.md) para la referencia completa.
 |---|---|---|
 | `POST` | `/v1/sharepoint/list/item` | Inserta un ítem en una lista identificada por su URL |
 | `PATCH` | `/v1/sharepoint/list/item` | Actualiza un ítem localizándolo por un campo único (`filter_by`) |
+| `POST` | `/v1/sharepoint/list/item:upsert` | Inserta o actualiza un ítem según coincidencia por clave (+ periodo opcional) |
 | `POST` | `/v1/sharepoint/upload` | Sube un archivo a una biblioteca/carpeta identificada por su URL (`multipart/form-data`) |
 
 ### Discovery
@@ -50,7 +51,7 @@ Ver [ARQUITECTURA.md](ARQUITECTURA.md) para la referencia completa.
 ### Health
 
 ```
-GET /health  →  { "status": "ok", "service": "SharePoint Connector", "version": "2.2.1" }
+GET /health  →  { "status": "ok", "service": "SharePoint Connector", "version": "2.3.0" }
 ```
 
 ---
@@ -98,6 +99,40 @@ curl -X PATCH "http://localhost:8003/v1/sharepoint/list/item" \
 
 `filter_by` debe identificar un **único** registro: si ninguno coincide se devuelve `404`, y si coincide más de uno, `409` (sin modificar nada).
 
+### Insertar o actualizar un ítem (upsert)
+
+Migra a código la lógica "verificar-y-decidir" del flujo de Power Automate: el
+conector busca un registro que coincida con `match` y, según el resultado, **crea**
+o **actualiza**. Es genérico (sirve a cualquier lista): la columna clave, la de
+fecha y el esquema de `data` viajan en el payload.
+
+```bash
+curl -X POST "http://localhost:8003/v1/sharepoint/list/item:upsert" \
+  -H "Content-Type: application/json" \
+  -H "X-App-ID: mi-app" \
+  -d '{
+    "sharepoint_url": "https://latinia2com-portal8.sharepoint.com/Oper/Lists/Registro%20incidencias%2024x7/View_RegistroInci.aspx",
+    "match": {
+      "key_field": "TicketId",
+      "key_value": "INC-12345",
+      "date_field": "Created",
+      "period": "current_month"
+    },
+    "data": { "Title": "Incidencia", "Estado": "Resuelto" }
+  }'
+```
+
+- `match.key_field` + `key_value`: igualdad exacta sobre la columna clave.
+- `match.date_field` + `period` (opcional): acota la coincidencia a un periodo.
+  `period` admite un atajo con nombre (`current_day`, `current_week`,
+  `current_month`, `current_year`) o un rango explícito `{ "from": "...", "to": "..." }`.
+  Los límites se calculan en la zona horaria del tenant (`TENANT_TIMEZONE`).
+  Sin `period`/`date_field`, la coincidencia es solo por clave.
+
+La respuesta indica `result: "created"` o `"updated"`, con `id`, `site_id`,
+`list_id` y `matched` (nº de coincidencias). Ante varias coincidencias se actualiza
+la **primera** y se registra un `warning` (no es error).
+
 ### Subir un archivo
 
 ```bash
@@ -135,6 +170,7 @@ Copia `devops/.env.example` a `devops/.env` y rellena los valores:
 | `CLIENT_ID` | Sí | ID del App Registration |
 | `CLIENT_SECRET` | Sí | Secreto del App Registration |
 | `LOG_LEVEL` | No | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default: `INFO`) |
+| `TENANT_TIMEZONE` | No | Zona horaria IANA del tenant para acotar periodos del upsert (default: `UTC`) |
 | `LOG_DIR` | No | Directorio del log rotativo a fichero; vacío = solo consola (default: vacío) |
 | `LOG_FILE` | No | Nombre del fichero de log (default: `api_server_sp_connector.log`) |
 | `SP_PORT` | No | Puerto expuesto en el host (default: `8003`) |

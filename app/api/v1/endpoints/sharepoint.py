@@ -11,16 +11,21 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 
+from app.core.config import settings
 from app.core.dependencies import get_resolver, get_sp
 from app.core.exceptions import GraphAPIError
 from app.core.uploads import read_upload
 from app.schemas.sharepoint import (
+    ExplicitPeriod,
     ListItemByUrlRequest,
     ListItemByUrlResponse,
     ListItemUpdateByUrlRequest,
     ListItemUpdateByUrlResponse,
+    UpsertListItemRequest,
+    UpsertListItemResponse,
     UploadByUrlResponse,
 )
+from app.services.period import resolve_period
 from app.services.resolver import SharePointResolver
 from app.services.sharepoint import SharePointService
 
@@ -117,6 +122,114 @@ async def update_list_item_by_url(
         webUrl=item.get("webUrl"),
         site_id=resolved.site_id,
         list_id=resolved.list_id,
+    )
+
+
+@router.post(
+    "/list/item:upsert",
+    response_model=UpsertListItemResponse,
+    summary="Insertar o actualizar un ítem de lista (upsert genérico)",
+)
+async def upsert_list_item_by_url(
+    payload: UpsertListItemRequest,
+    sp: SharePointService = Depends(get_sp),
+    resolver: SharePointResolver = Depends(get_resolver),
+):
+    """Inserta o actualiza un ítem de la lista identificada por `sharepoint_url`.
+
+    El conector verifica primero si ya existe un registro que coincida con
+    `match` y, según el resultado, **crea** uno nuevo o **actualiza** el existente
+    (idempotencia). Es genérico: ni la columna clave, ni la de fecha, ni el
+    esquema de `data` están quemados — todo viaja en el payload.
+
+    Coincidencia (`match`):
+    - `key_field` + `key_value`: igualdad exacta sobre la columna clave.
+    - `date_field` + `period` (opcional): acota a un periodo. `period` admite un
+      atajo con nombre (`current_day`, `current_week`, `current_month`,
+      `current_year`) o un rango explícito `{ "from": "...", "to": "..." }`.
+      Sin `period`/`date_field`, la coincidencia es solo por clave.
+
+    Desenlace:
+    - **0 coincidencias** → crea el ítem y responde `result="created"`.
+    - **≥1 coincidencia** → actualiza el **primer** registro y responde
+      `result="updated"`. Si hay más de uno, se emite un `warning` en los logs
+      (no es error); `matched` indica cuántos coincidieron.
+    """
+    match = payload.match
+    logger.info(
+        "upsert_list_item_by_url → url=%r key=%s=%r date_field=%r period=%r",
+        payload.sharepoint_url,
+        match.key_field,
+        match.key_value,
+        match.date_field,
+        match.period,
+    )
+
+    resolved = await resolver.resolve_list(payload.sharepoint_url)
+
+    if isinstance(match.period, ExplicitPeriod):
+        period_input: "str | tuple[str, str] | None" = (match.period.from_, match.period.to)
+    else:
+        period_input = match.period
+    bounds = resolve_period(period_input, settings.tenant_timezone)
+    period_start, period_end = bounds if bounds else (None, None)
+
+    matches = await sp.find_list_items_for_upsert(
+        resolved.site_id,
+        resolved.list_id,
+        key_field=match.key_field,
+        key_value=match.key_value,
+        date_field=match.date_field,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    if not matches:
+        created = await sp.create_list_item(resolved.site_id, resolved.list_id, payload.data)
+        logger.info(
+            "Upsert → created id=%s (%s=%r)",
+            created.get("id"),
+            match.key_field,
+            match.key_value,
+            extra={"site_id": resolved.site_id, "list_id": resolved.list_id},
+        )
+        return UpsertListItemResponse(
+            result="created",
+            id=created["id"],
+            webUrl=created.get("webUrl"),
+            site_id=resolved.site_id,
+            list_id=resolved.list_id,
+            matched=0,
+        )
+
+    if len(matches) > 1:
+        logger.warning(
+            "Upsert: %d registros coinciden con %s=%r (+periodo) — se actualiza el primero "
+            "(posibles duplicados preexistentes)",
+            len(matches),
+            match.key_field,
+            match.key_value,
+            extra={"site_id": resolved.site_id, "list_id": resolved.list_id},
+        )
+
+    item = matches[0]
+    item_id = item["id"]
+    await sp.update_list_item(resolved.site_id, resolved.list_id, item_id, payload.data)
+    logger.info(
+        "Upsert → updated id=%s (%s=%r, matched=%d)",
+        item_id,
+        match.key_field,
+        match.key_value,
+        len(matches),
+        extra={"site_id": resolved.site_id, "list_id": resolved.list_id},
+    )
+    return UpsertListItemResponse(
+        result="updated",
+        id=item_id,
+        webUrl=item.get("webUrl"),
+        site_id=resolved.site_id,
+        list_id=resolved.list_id,
+        matched=len(matches),
     )
 
 

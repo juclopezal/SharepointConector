@@ -237,4 +237,200 @@ def test_endpoints_present_in_openapi(wired_client):
     client, _, _ = wired_client
     schema = client.app.openapi()
     assert "/v1/sharepoint/list/item" in schema["paths"]
+    assert "/v1/sharepoint/list/item:upsert" in schema["paths"]
     assert "/v1/sharepoint/upload" in schema["paths"]
+
+
+# ----------------------------------------------------------------------
+# Upsert — POST /v1/sharepoint/list/item:upsert
+# ----------------------------------------------------------------------
+
+
+def test_upsert_creates_when_no_match(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_find(site_id, list_id, **kwargs):
+        received.update(find=kwargs)
+        return []
+
+    async def fake_create(site_id, list_id, fields):
+        received.update(create_fields=fields)
+        return {"id": "99", "webUrl": "https://host/item/99"}
+
+    fake_sp.find_list_items_for_upsert = fake_find
+    fake_sp.create_list_item = fake_create
+
+    resp = client.post(
+        "/v1/sharepoint/list/item:upsert",
+        json={
+            "sharepoint_url": "https://host/Oper/Lists/Inci/View.aspx",
+            "match": {"key_field": "TicketId", "key_value": "INC-1"},
+            "data": {"Title": "Nuevo"},
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "result": "created",
+        "id": "99",
+        "webUrl": "https://host/item/99",
+        "site_id": "SITE",
+        "list_id": "LIST",
+        "matched": 0,
+    }
+    assert received["create_fields"] == {"Title": "Nuevo"}
+    # sin period → sin límites de fecha
+    assert received["find"]["key_field"] == "TicketId"
+    assert received["find"]["period_start"] is None
+
+
+def test_upsert_updates_first_when_match_with_period(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_find(site_id, list_id, **kwargs):
+        received.update(find=kwargs)
+        return [{"id": "5", "webUrl": "https://host/item/5"}]
+
+    async def fake_update(site_id, list_id, item_id, fields):
+        received.update(update=(item_id, fields))
+        return {}
+
+    fake_sp.find_list_items_for_upsert = fake_find
+    fake_sp.update_list_item = fake_update
+
+    resp = client.post(
+        "/v1/sharepoint/list/item:upsert",
+        json={
+            "sharepoint_url": "https://host/Oper/Lists/Inci/View.aspx",
+            "match": {
+                "key_field": "TicketId",
+                "key_value": "INC-1",
+                "date_field": "Created",
+                "period": "current_month",
+            },
+            "data": {"Estado": "Resuelto"},
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == "updated"
+    assert body["id"] == "5"
+    assert body["matched"] == 1
+    assert received["update"] == ("5", {"Estado": "Resuelto"})
+    # el period current_month produce límites de fecha que llegan al servicio
+    assert received["find"]["date_field"] == "Created"
+    assert received["find"]["period_start"] is not None
+    assert received["find"]["period_end"] is not None
+
+
+def test_upsert_multiple_matches_updates_first_no_error(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    updated = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_find(site_id, list_id, **kwargs):
+        return [{"id": "1"}, {"id": "2"}, {"id": "3"}]
+
+    async def fake_update(site_id, list_id, item_id, fields):
+        updated["item_id"] = item_id
+        return {}
+
+    fake_sp.find_list_items_for_upsert = fake_find
+    fake_sp.update_list_item = fake_update
+
+    resp = client.post(
+        "/v1/sharepoint/list/item:upsert",
+        json={
+            "sharepoint_url": "https://host/Oper/Lists/Inci/View.aspx",
+            "match": {"key_field": "TicketId", "key_value": "DUP"},
+            "data": {"Title": "x"},
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == "updated"
+    assert body["id"] == "1"  # se actualiza el primero
+    assert body["matched"] == 3
+    assert updated["item_id"] == "1"
+
+
+def test_upsert_period_without_date_field_returns_422(wired_client):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        "/v1/sharepoint/list/item:upsert",
+        json={
+            "sharepoint_url": "https://host/Oper/Lists/Inci/View.aspx",
+            "match": {
+                "key_field": "TicketId",
+                "key_value": "INC-1",
+                "period": "current_month",
+            },
+            "data": {"Title": "x"},
+        },
+    )
+
+    assert resp.status_code == 422
+
+
+def test_upsert_explicit_period_passes_utc_bounds(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_find(site_id, list_id, **kwargs):
+        received.update(kwargs)
+        return []
+
+    async def fake_create(site_id, list_id, fields):
+        return {"id": "1", "webUrl": "w"}
+
+    fake_sp.find_list_items_for_upsert = fake_find
+    fake_sp.create_list_item = fake_create
+
+    resp = client.post(
+        "/v1/sharepoint/list/item:upsert",
+        json={
+            "sharepoint_url": "https://host/Oper/Lists/Inci/View.aspx",
+            "match": {
+                "key_field": "CodigoContrato",
+                "key_value": "C-9",
+                "date_field": "FechaAlta",
+                "period": {"from": "2026-01-01", "to": "2026-06-30"},
+            },
+            "data": {"Estado": "Vigente"},
+        },
+    )
+
+    assert resp.status_code == 200
+    # tenant_timezone por defecto = UTC
+    assert received["period_start"] == "2026-01-01T00:00:00Z"
+    assert received["period_end"] == "2026-07-01T00:00:00Z"
+
+
+def test_upsert_invalid_key_field_returns_422(wired_client):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        "/v1/sharepoint/list/item:upsert",
+        json={
+            "sharepoint_url": "https://host/Oper/Lists/Inci/View.aspx",
+            "match": {"key_field": "Ticket eq 'x' or fields/Id", "key_value": "v"},
+            "data": {"Title": "x"},
+        },
+    )
+
+    assert resp.status_code == 422

@@ -1,3 +1,43 @@
+## v2.3.0 — 2026-06-18
+
+### Feature: Upsert genérico de ítems de lista (SPEC-003)
+
+**Contexto:** Un servicio externo disparaba un flujo de Power Automate que, antes de insertar en una lista, **verificaba** si ya existía un registro equivalente (misma clave dentro del mes en curso) y actualizaba o creaba según el resultado. Se migra esa lógica "verificar-y-decidir" a este conector, manteniéndola **genérica**: ninguna lista, columna clave, campo de fecha ni esquema de datos queda quemado en el código — todo viaja en el payload, de modo que cualquier lista de SharePoint pueda reutilizar el mismo endpoint.
+
+**Solución:** Se añade `POST /v1/sharepoint/list/item:upsert` (tercera vía: endpoint de *upsert* explícito, evitando el anti-patrón *flag-argument* sobre el `POST`/`PATCH` ya estables). Orquesta sobre primitivos existentes: resuelve la URL a `site_id`+`list_id` (resolver de SPEC-002), busca coincidencias y crea o actualiza.
+
+```json
+{
+  "sharepoint_url": "https://host.sharepoint.com/Oper/Lists/Incidencias/View.aspx",
+  "match": {
+    "key_field": "TicketId",
+    "key_value": "INC-12345",
+    "date_field": "Created",
+    "period": "current_month"
+  },
+  "data": { "Title": "Incidencia", "Estado": "Resuelto" }
+}
+```
+
+- **Coincidencia** = igualdad exacta sobre `key_field` **y** (opcional) rango sobre `date_field`. `period` admite atajos con nombre (`current_day`, `current_week`, `current_month`, `current_year`) o rango explícito `{from,to}` (`to` inclusive). Sin `period`/`date_field`, solo por clave; `period` sin `date_field` se rechaza con `422`.
+- **Periodo en la zona horaria del tenant:** los límites se calculan en `TENANT_TIMEZONE` (IANA, default `UTC`) y se convierten a UTC para el `$filter` de Graph (intervalo semiabierto `ge`/`lt`).
+- **Desenlace:** `result="created"` si 0 coincidencias; `result="updated"` si ≥1 (se actualiza la **primera**). A diferencia del `PATCH`, varias coincidencias **no** son `409`: se emite un `warning` en logs y se devuelve `matched` (nº de coincidencias) para detectar duplicados preexistentes.
+
+**Archivos nuevos:**
+- `app/services/period.py` — `resolve_period()`: atajo con nombre / rango explícito → intervalo UTC en la zona del tenant
+- `tests/test_period.py` — 10 tests (rango explícito, conversión TZ, atajos, validaciones)
+
+**Archivos modificados:**
+- `app/services/sharepoint.py` — nuevo método `find_list_items_for_upsert()` (filtro combinado clave + rango de fecha)
+- `app/schemas/sharepoint.py` — modelos `ExplicitPeriod`, `UpsertMatch` (con validador period↔date_field), `UpsertListItemRequest`, `UpsertListItemResponse`
+- `app/api/v1/endpoints/sharepoint.py` — endpoint `POST /v1/sharepoint/list/item:upsert`
+- `app/core/config.py` — setting `tenant_timezone` (default `UTC`)
+- `requirements.txt` — `tzdata` (zoneinfo en Windows)
+- `tests/test_sharepoint_endpoints.py`, `tests/test_sharepoint_service.py` — 10 tests nuevos (created/updated/empate, validaciones, filtro)
+- `VERSION`, `README.md`, `ARQUITECTURA.md`, `TECNOLOGIAS.md`, `devops/.env.example` — documentación y config a v2.3.0
+
+---
+
 ## v2.2.1 — 2026-06-11
 
 ### Fix: Endurecimiento de seguridad y paginación de Graph

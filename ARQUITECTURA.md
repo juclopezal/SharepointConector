@@ -1,7 +1,7 @@
 # Arquitectura: SharePoint Connector
 
-**Versión:** 2.2.1  
-**Fecha:** 2026-06-11  
+**Versión:** 2.3.0  
+**Fecha:** 2026-06-18  
 **Autor:** Juan Camilo López Alzate — Latinia  
 
 ---
@@ -76,7 +76,7 @@ graph TD
         EP_DISC["discovery.py\nGET /sites\nGET /sites/{id}/lists\nGET /sites/{id}/drives\nGET /sites/{id}/drives/{id}/items"]
         EP_LIST["list_items.py\nGET  /sites/{id}/lists/{id}/items\nPOST /sites/{id}/lists/{id}/items"]
         EP_FILE["files.py\nPOST /sites/{id}/drives/{id}/files\nGET  /sites/{id}/drives/{id}/items/{id}\nGET  /sites/{id}/drives/{id}/items/{id}/download"]
-        EP_SP["sharepoint.py (by URL)\nPOST  /sharepoint/list/item\nPATCH /sharepoint/list/item\nPOST  /sharepoint/upload"]
+        EP_SP["sharepoint.py (by URL)\nPOST  /sharepoint/list/item\nPATCH /sharepoint/list/item\nPOST  /sharepoint/list/item:upsert\nPOST  /sharepoint/upload"]
     end
 
     subgraph "app/core"
@@ -130,9 +130,10 @@ graph TD
 | **Discovery** | `app/api/v1/endpoints/discovery.py` | Endpoints de exploración (sites, listas, drives, carpetas) |
 | **List Items** | `app/api/v1/endpoints/list_items.py` | Lectura y creación de ítems en listas |
 | **Files** | `app/api/v1/endpoints/files.py` | Subida, metadata y descarga de archivos |
-| **SharePoint (by URL)** | `app/api/v1/endpoints/sharepoint.py` | Endpoints orientados a usuario: crear / actualizar ítem y subir archivo a partir de una URL |
+| **SharePoint (by URL)** | `app/api/v1/endpoints/sharepoint.py` | Endpoints orientados a usuario: crear / actualizar / *upsert* de ítem y subir archivo a partir de una URL |
 | **Schemas** | `app/schemas/` | Modelos Pydantic de request/response por dominio |
 | **SharePointService** | `app/services/sharepoint.py` | Cliente HTTP de Graph API (GET, POST, PATCH, PUT, descarga, búsqueda y actualización de ítems, resolución de site) |
+| **Period** | `app/services/period.py` | Traducción del `period` del upsert (atajo con nombre o rango explícito) a un intervalo UTC, calculado en la zona horaria del tenant |
 | **SharePointResolver** | `app/services/resolver.py` | Traducción de URLs de SharePoint a `site_id`/`list_id`/`drive_id`+carpeta |
 
 ---
@@ -149,7 +150,7 @@ El conector expone dos niveles de API bajo `/v1`:
 `SharePointResolver` traduce una URL "humana" de SharePoint a los identificadores que Graph necesita:
 
 1. **Site:** se intenta `GET /sites/{host}:/{path}` con la ruta de la URL y, ante un `404`, se recorta el último segmento y se reintenta hacia la raíz. El primer path que resuelve es el *web* más profundo que contiene el recurso. Cubre de forma uniforme la raíz, managed paths (`/Oper`), `/sites/{x}`, `/teams/{x}` y subsites anidados. Los IDs de site resueltos se cachean (son estables).
-2. **Lista** (`POST` y `PATCH /v1/sharepoint/list/item`): se localiza el segmento tras `/Lists/` y se empareja contra las listas del site por `webUrl` (coincidencia exacta) con fallback a `displayName`/`name`. La misma resolución sirve para crear (`POST`) y para actualizar (`PATCH`).
+2. **Lista** (`POST`, `PATCH` y `POST .../list/item:upsert`): se localiza el segmento tras `/Lists/` y se empareja contra las listas del site por `webUrl` (coincidencia exacta) con fallback a `displayName`/`name`. La misma resolución sirve para crear (`POST`), actualizar (`PATCH`) y el upsert.
 3. **Biblioteca y carpeta** (`POST /v1/sharepoint/upload`): la carpeta destino se toma del parámetro `?id=` (ruta servidor) o de la propia ruta sin la página de formulario. La biblioteca es el drive cuyo `webUrl` es el prefijo más largo de esa ruta; el resto es la carpeta destino (que se crea automáticamente al subir).
 
 ```mermaid
@@ -209,6 +210,39 @@ La búsqueda usa `GET .../items?$expand=fields&$filter=fields/{field} eq '{value
 ```json
 { "status": "updated", "id": "7", "webUrl": "https://...", "site_id": "...", "list_id": "..." }
 ```
+
+#### `POST /v1/sharepoint/list/item:upsert`
+
+*Upsert* genérico (verificar-y-decidir): inserta o actualiza según una coincidencia por **clave** y, opcionalmente, **periodo**. No hay nada de dominio quemado — la columna clave, la de fecha y el esquema de `data` viajan en el payload, de modo que el mismo endpoint sirve a **cualquier lista**.
+
+**Request:**
+```json
+{
+  "sharepoint_url": "https://host.sharepoint.com/Oper/Lists/Incidencias/View.aspx",
+  "match": {
+    "key_field": "TicketId",
+    "key_value": "INC-12345",
+    "date_field": "Created",
+    "period": "current_month"
+  },
+  "data": { "Title": "Incidencia", "Estado": "Resuelto" }
+}
+```
+
+El filtro combina con `and`: igualdad exacta sobre `key_field` y, si se indica `date_field` + `period`, un rango `fields/{date_field} ge '{inicio}' and ... lt '{fin}'`. `period` admite un **atajo con nombre** (`current_day`, `current_week`, `current_month`, `current_year`) o un **rango explícito** `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }` (con `to` inclusive). Los límites se calculan en la **zona horaria del tenant** (`TENANT_TIMEZONE`) y se convierten a UTC para el `$filter` (`app/services/period.py`). Sin `period`/`date_field`, la coincidencia es solo por clave; indicar `period` sin `date_field` se rechaza con `422`.
+
+| Coincidencias | Desenlace |
+|---|---|
+| 0 | `create_list_item` → `result="created"` |
+| 1 | `update_list_item` sobre ese ítem → `result="updated"` |
+| > 1 | se actualiza el **primero**, `result="updated"` y `warning` en logs (no `409`) |
+
+**Response 200:**
+```json
+{ "result": "updated", "id": "7", "webUrl": "https://...", "site_id": "...", "list_id": "...", "matched": 1 }
+```
+
+> A diferencia del `PATCH`, varias coincidencias **no** son error: la decisión de negocio es actualizar la primera y emitir un `warning` para detectar duplicados preexistentes.
 
 #### `POST /v1/sharepoint/upload`
 
@@ -412,7 +446,7 @@ Descarga el contenido binario del archivo.
 #### `GET /health`
 
 ```json
-{ "status": "ok", "service": "SharePoint Connector", "version": "2.2.1" }
+{ "status": "ok", "service": "SharePoint Connector", "version": "2.3.0" }
 ```
 
 ---
@@ -519,6 +553,7 @@ Campos estructurados disponibles: `request_id`, `client_app_id`, `method`, `path
 | `CLIENT_ID` | Sí | ID del App Registration | `xxxxxxxx-...` |
 | `CLIENT_SECRET` | Sí | Secreto del App Registration | `abc123~...` |
 | `LOG_LEVEL` | No | Nivel de log (`DEBUG`/`INFO`/`WARNING`/`ERROR`) | `INFO` |
+| `TENANT_TIMEZONE` | No | Zona horaria IANA del tenant para acotar periodos del upsert | `UTC` / `Europe/Madrid` |
 | `SP_PORT` | No | Puerto expuesto en el host | `8003` |
 
 > La API opera siempre con `site_id`, `list_id` y `drive_id` pasados como path params en cada llamada. Obtener estos IDs es el primer paso mediante los endpoints de discovery.

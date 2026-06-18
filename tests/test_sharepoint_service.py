@@ -99,6 +99,77 @@ async def test_find_escapes_and_encodes_filter(sp):
 
 
 # ----------------------------------------------------------------------
+# find_list_items_for_upsert — filtro combinado clave (+ periodo)
+# ----------------------------------------------------------------------
+
+
+async def test_upsert_lookup_key_only_filter(sp):
+    captured = {}
+
+    async def fake_get(url, extra_headers=None):
+        captured["url"] = url
+        captured["headers"] = extra_headers
+        return {"value": []}
+
+    sp._get = fake_get
+    await sp.find_list_items_for_upsert(
+        "SITE", "LIST", key_field="TicketId", key_value="INC-1"
+    )
+
+    # solo la condición de clave, percent-encodeada, con la cabecera Prefer
+    assert "$filter=fields%2FTicketId%20eq%20%27INC-1%27" in captured["url"]
+    assert "ge%27" not in captured["url"]  # sin rango de fecha
+    assert captured["headers"]["Prefer"] == "HonorNonIndexedQueriesWarningMayFailRandomly"
+
+
+async def test_upsert_lookup_key_and_period_filter(sp):
+    captured = {}
+
+    async def fake_get(url, extra_headers=None):
+        captured["url"] = url
+        return {"value": []}
+
+    sp._get = fake_get
+    await sp.find_list_items_for_upsert(
+        "SITE",
+        "LIST",
+        key_field="TicketId",
+        key_value="INC-1",
+        date_field="Created",
+        period_start="2026-06-01T00:00:00Z",
+        period_end="2026-07-01T00:00:00Z",
+    )
+
+    # las tres condiciones unidas con 'and' (percent-encodeado: %20and%20)
+    assert "%20and%20" in captured["url"]
+    assert "fields%2FCreated%20ge%20%272026-06-01T00%3A00%3A00Z%27" in captured["url"]
+    assert "fields%2FCreated%20lt%20%272026-07-01T00%3A00%3A00Z%27" in captured["url"]
+
+
+@pytest.mark.parametrize("bad_field", ["Title eq 'x'", "fields/Other", "a-b", ""])
+async def test_upsert_lookup_rejects_invalid_key_field(sp, bad_field):
+    with pytest.raises(GraphAPIError) as exc:
+        await sp.find_list_items_for_upsert(
+            "SITE", "LIST", key_field=bad_field, key_value="v"
+        )
+    assert exc.value.status_code == 400
+
+
+async def test_upsert_lookup_rejects_invalid_date_field(sp):
+    with pytest.raises(GraphAPIError) as exc:
+        await sp.find_list_items_for_upsert(
+            "SITE",
+            "LIST",
+            key_field="TicketId",
+            key_value="v",
+            date_field="Created eq 'x'",
+            period_start="2026-06-01T00:00:00Z",
+            period_end="2026-07-01T00:00:00Z",
+        )
+    assert exc.value.status_code == 400
+
+
+# ----------------------------------------------------------------------
 # Paginación — @odata.nextLink
 # ----------------------------------------------------------------------
 

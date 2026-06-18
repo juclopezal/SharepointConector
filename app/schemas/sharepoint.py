@@ -1,8 +1,8 @@
 """Schemas de los endpoints orientados a usuario (resolución por URL)."""
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ListItemByUrlRequest(BaseModel):
@@ -75,6 +75,98 @@ class ListItemUpdateByUrlResponse(BaseModel):
     webUrl: str | None = None
     site_id: str
     list_id: str
+
+
+class ExplicitPeriod(BaseModel):
+    """Rango de fechas explícito para acotar el periodo del upsert.
+
+    Ambos extremos son fechas ``YYYY-MM-DD``; ``to`` es **inclusive** (cubre todo
+    ese día). Los límites se interpretan en la zona horaria del tenant.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(
+        ...,
+        alias="from",
+        description="Fecha inicial inclusive (YYYY-MM-DD), en la zona del tenant.",
+    )
+    to: str = Field(
+        ...,
+        description="Fecha final inclusive (YYYY-MM-DD), en la zona del tenant.",
+    )
+
+
+class UpsertMatch(BaseModel):
+    """Criterio de coincidencia del upsert: clave y, opcionalmente, periodo."""
+
+    key_field: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9_]+$",
+        description=(
+            "Nombre interno de la columna clave (variable por lista). Solo letras, "
+            "dígitos y '_'."
+        ),
+    )
+    key_value: str = Field(
+        ..., description="Valor exacto que debe tener la columna clave."
+    )
+    date_field: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_]+$",
+        description=(
+            "Nombre interno de la columna de fecha que acota el periodo (p. ej. "
+            "'Created', 'Modified' o una columna propia). Opcional."
+        ),
+    )
+    period: str | ExplicitPeriod | None = Field(
+        default=None,
+        description=(
+            "Alcance temporal. Atajo con nombre ('current_day', 'current_week', "
+            "'current_month', 'current_year') o rango explícito {'from','to'}. "
+            "Requiere `date_field`. Si se omite, la coincidencia es solo por clave."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _period_requires_date_field(self) -> "UpsertMatch":
+        if self.period is not None and not self.date_field:
+            raise ValueError(
+                "Para acotar por periodo debe indicarse también `date_field`."
+            )
+        return self
+
+
+class UpsertListItemRequest(BaseModel):
+    sharepoint_url: str = Field(
+        ...,
+        description=(
+            "URL de la lista tal como aparece en el navegador, p. ej. "
+            "https://host.sharepoint.com/sitio/Lists/MiLista/AllItems.aspx"
+        ),
+    )
+    match: UpsertMatch = Field(
+        ..., description="Criterio para localizar el registro existente (clave + periodo)."
+    )
+    data: dict[str, Any] = Field(
+        ...,
+        description=(
+            "Campos a escribir (crear o actualizar). Las claves deben ser los "
+            "nombres internos de las columnas de la lista."
+        ),
+    )
+
+
+class UpsertListItemResponse(BaseModel):
+    result: Literal["created", "updated"]
+    id: str
+    webUrl: str | None = None
+    site_id: str
+    list_id: str
+    matched: int = Field(
+        default=0,
+        description="Número de registros que coincidieron con el criterio.",
+    )
 
 
 class UploadByUrlResponse(BaseModel):
