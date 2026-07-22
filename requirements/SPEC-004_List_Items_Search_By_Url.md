@@ -144,3 +144,34 @@ Implementación completa de la spec sobre el cambio OpenSpec
 - `order_by` sobre la lista completa (>5000 filas, columna no indexada) →
   error de Graph propagado con detalle íntegro (`code: notSupported`,
   "supera el umbral de vista de lista", innerError con request-id). ✓
+
+### 2026-07-22 — Agente LLM (Claude Code) · Iteración v2.5.0: proyección `select`
+
+**Requerimiento añadido (aprobado por el propietario el 2026-07-22):** campo
+opcional `select` (hasta 50 nombres internos de columna) que proyecta el
+`fields` de cada ítem devuelto a solo esas columnas, vía
+`$expand=fields($select=...)` de Graph. Omitido o `[]` → todos los campos
+(retrocompatible con v2.4.0).
+
+**Criterios de aceptación de la iteración:**
+1. Con `select`, los ítems devuelven solo las columnas pedidas (más las claves
+   de sistema que Graph añade, p. ej. `@odata.etag`).
+2. Columna inexistente en `select` → `400` nombrándola (Graph la ignoraría en
+   silencio); patrón inválido o >50 entradas → `422`.
+3. Columnas lookup: ambas formas válidas en `select` — nombre base (valor
+   visible) y `{Columna}LookupId` (ID numérico) — asimetría deliberada con
+   `filters`, donde el nombre base se rechaza.
+4. Suite `pytest` en verde y verificación empírica contra la lista DSL real.
+
+**Archivos modificados:** `app/schemas/sharepoint.py` (campo `select`),
+`app/services/sharepoint.py` (`_validate_select_column`, construcción del
+`$expand` proyectado), `app/api/v1/endpoints/sharepoint.py` (paso de `select`),
+tests (14 nuevos, 128/128), docs y `VERSION` a 2.5.0.
+
+**Verificación empírica (2026-07-22, lista DSL real, Docker local, v2.5.0 en `/health`):**
+- `select: ["Title","Entorno","_x00da_ltima"]` con filtro `Entorno="L02"` → cada
+  ítem trae en `fields` exactamente esas tres columnas más **una única clave de
+  sistema: `@odata.etag`** (set exacto confirmado; ninguna otra). ✓
+- Columna inexistente en `select` → `400` nombrándola (no ignorada). ✓
+- Ambas formas lookup en `select`: `Cliente_x002d_LIBSA` proyecta el valor
+  visible ("BANCOPPEL") y `Cliente_x002d_LIBSALookupId` el ID (35). ✓

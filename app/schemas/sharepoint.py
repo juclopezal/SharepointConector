@@ -1,8 +1,11 @@
 """Schemas de los endpoints orientados a usuario (resolución por URL)."""
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# Nombre interno de columna: mismo patrón anti-inyección que los campos de filtro.
+_ColumnName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")]
 
 
 class ListItemByUrlRequest(BaseModel):
@@ -241,6 +244,17 @@ class ListItemsSearchByUrlRequest(BaseModel):
     order_by: OrderBy | None = Field(
         default=None,
         description="Ordenación opcional del resultado.",
+    )
+    select: list[_ColumnName] | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "Hasta 50 nombres internos de columna a devolver en `fields` de cada "
+            "ítem (proyección). Omitido o vacío → todos los campos. Cada nombre "
+            "se valida contra el esquema real de la lista. Las columnas lookup "
+            "admiten ambas formas: el nombre base (valor visible) y "
+            "'{Columna}LookupId' (ID numérico)."
+        ),
     )
     top: int = Field(
         default=100,

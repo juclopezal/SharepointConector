@@ -1,6 +1,6 @@
 # Diagramas de Arquitectura (PlantUML): SharePoint Connector
 
-**Versión:** 2.4.0
+**Versión:** 2.5.0
 **Fecha:** 2026-07-22
 **Autor:** Juan Camilo López Alzate — Latinia
 

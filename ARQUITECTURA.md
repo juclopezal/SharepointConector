@@ -1,6 +1,6 @@
 # Arquitectura: SharePoint Connector
 
-**Versión:** 2.4.0  
+**Versión:** 2.5.0  
 **Fecha:** 2026-07-22  
 **Autor:** Juan Camilo López Alzate — Latinia  
 
@@ -286,6 +286,8 @@ La expresión completa se percent-encodea y se envía con `Prefer: HonorNonIndex
 **`order_by`** → `$orderby=fields/{field} asc|desc`. **Limitación conocida:** en listas que superan el umbral de vista de SharePoint (~5000 filas), Graph responde `notSupported` al ordenar por columnas no indexadas; el error se propaga con su detalle. Recomendación: ordenar por columnas indexadas (`Created`, `Modified`, `ID`).
 
 **`top`** (1–5000, default 100): Graph trata `$top` como tamaño de página, no como límite total, así que el conector sigue `@odata.nextLink` solo hasta reunir `top` ítems y trunca el excedente. `has_more: true` indica que el corte dejó fuera filas coincidentes. (Paginación por cursor: evaluada y pospuesta conscientemente; añadirla después es retrocompatible.)
+
+**`select`** (v2.5.0, opcional, hasta 50 nombres) → `$expand=fields($select=Col1,Col2,...)`: proyecta el `fields` de cada ítem a solo esas columnas. Cada nombre se valida en doble capa (`[A-Za-z0-9_]+` → `422`; contra el esquema real de columnas → `400` si no existe, porque Graph ignora en silencio los nombres desconocidos en `$select`). **Asimetría deliberada con los filtros:** en `select` las columnas lookup admiten ambas formas — el nombre base proyecta el valor visible y `{Columna}LookupId` el ID numérico — mientras que en `filters` el nombre base se rechaza (filtrar por él es poco fiable en Graph). Omitido o `[]` → todos los campos. Graph puede añadir claves de sistema (p. ej. `@odata.etag`) dentro de `fields` aun con proyección.
 
 **Response 200:**
 ```json

@@ -1,3 +1,30 @@
+## v2.5.0 — 2026-07-22
+
+### Feature: Proyección de campos con `select` en items:search (SPEC-004)
+
+**Contexto:** Los consumidores de `POST /v1/sharepoint/list/items:search` (p. ej. sobre la lista DSL) extraen registros cuyas filas tienen muchas columnas, pero solo usan unas pocas — cada respuesta arrastraba el `fields` completo de cada ítem.
+
+**Solución:** Campo opcional `select` en el body (hasta 50 nombres internos de columna): el `fields` de cada ítem devuelto contiene **solo esas columnas**, vía `$expand=fields($select=...)` de Graph. Omitido o `[]` → todos los campos (retrocompatible con v2.4.0).
+
+```json
+{ "sharepoint_url": "https://.../Lists/DSL/Allitemsg.aspx",
+  "filters": [ { "field": "Entorno", "value": "L02" } ],
+  "select": ["Title", "Entorno", "_x00da_ltima"] }
+```
+
+- Cada nombre se valida en doble capa: patrón `[A-Za-z0-9_]+` (`422`) y esquema real de columnas (`400` si no existe — Graph ignora en silencio los nombres desconocidos en `$select`, ocultando typos del caller).
+- **Asimetría deliberada con `filters`:** en `select` las columnas lookup admiten ambas formas (nombre base → valor visible; `{Columna}LookupId` → ID numérico); en `filters` el nombre base sigue rechazándose con `400`.
+- Graph puede incluir claves de sistema (p. ej. `@odata.etag`) dentro de `fields` aun con proyección.
+
+**Archivos modificados:**
+- `app/schemas/sharepoint.py` — campo `select` en `ListItemsSearchByUrlRequest` (max 50, patrón por entrada)
+- `app/services/sharepoint.py` — `_validate_select_column()`, construcción de `$expand=fields($select=...)` en `search_list_items()`
+- `app/api/v1/endpoints/sharepoint.py` — paso de `select` y documentación del endpoint
+- `tests/test_sharepoint_service.py`, `tests/test_sharepoint_endpoints.py` — 14 tests nuevos (128/128 en verde)
+- `VERSION`, `README.md`, `ARQUITECTURA.md`, `arquitecturasUML.md`, `requirements/SPEC-004` — documentación a v2.5.0
+
+---
+
 ## v2.4.0 — 2026-07-22
 
 ### Feature: Búsqueda multi-campo de ítems de lista (SPEC-004)

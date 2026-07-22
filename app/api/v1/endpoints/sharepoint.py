@@ -264,6 +264,12 @@ async def search_list_items_by_url(
     indexadas (`notSupported`); el error se propaga con su detalle — usa
     columnas indexadas como `Created`, `Modified` o `ID`.
 
+    `select` (opcional, hasta 50 nombres): proyecta el `fields` de cada ítem a
+    solo esas columnas (Graph puede añadir claves de sistema como `@odata.etag`).
+    Columna inexistente en `select` → `400`. Las columnas lookup admiten ambas
+    formas: nombre base (valor visible) y `{Columna}LookupId` (ID numérico).
+    Omitido o `[]` → todos los campos.
+
     `top` (1–5000, por defecto 100) acota el resultado siguiendo la paginación
     de Graph; `has_more` indica si quedaron filas coincidentes fuera del corte.
     0 coincidencias → `200` con `total: 0`.
@@ -289,6 +295,7 @@ async def search_list_items_by_url(
         resolved.list_id,
         filters=filters or None,
         order_by=order_by,
+        select=payload.select or None,
         top=payload.top,
     )
     return ListItemsSearchByUrlResponse(

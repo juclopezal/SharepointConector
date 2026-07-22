@@ -84,6 +84,30 @@ def _search_field_expected_type(
     )
 
 
+def _validate_select_column(columns: list[dict], name: str) -> None:
+    """Valida que ``name`` sea proyectable en ``$select`` contra el esquema real.
+
+    A diferencia de los filtros, aquí una columna lookup es válida en sus DOS
+    formas: el nombre base (Graph proyecta el valor visible) y
+    ``{Base}LookupId`` (el ID numérico). Un nombre que no corresponde a ninguna
+    columna se rechaza con 400: Graph ignora en silencio los nombres
+    desconocidos en ``$select``, lo que ocultaría typos del caller.
+    """
+    by_name = {c.get("name") for c in columns}
+    if name in by_name:
+        return
+    if name.endswith(_LOOKUP_ID_SUFFIX):
+        base = name[: -len(_LOOKUP_ID_SUFFIX)]
+        base_col = next((c for c in columns if c.get("name") == base), None)
+        if base_col is not None and "lookup" in base_col:
+            return
+    raise GraphAPIError(
+        400,
+        f"La columna '{name}' de `select` no existe en la lista. Debe ser el "
+        "nombre interno de una columna existente.",
+    )
+
+
 def _check_search_value_type(
     field: str,
     value: "str | bool | int | float",
@@ -477,6 +501,7 @@ class SharePointService:
         *,
         filters: "list[tuple[str, str | bool | int | float]] | None" = None,
         order_by: "tuple[str, str] | None" = None,
+        select: "list[str] | None" = None,
         top: int = 100,
     ) -> tuple[list[dict], bool]:
         """Busca ítems con 0..N condiciones de igualdad combinadas con ``and``.
@@ -492,10 +517,18 @@ class SharePointService:
         Graph (:meth:`_get_bounded`); ``order_by`` añade ``$orderby`` y, si la
         lista supera el umbral de vista de SharePoint sin un filtro indexado,
         el error ``notSupported`` de Graph se propaga con su detalle.
+
+        ``select`` proyecta ``fields`` a solo esas columnas vía
+        ``$expand=fields($select=...)`` (Graph puede añadir claves de sistema
+        como ``@odata.etag``); cada nombre se valida contra el esquema real
+        (:func:`_validate_select_column`). Vacío u omitido → todos los campos.
         """
+        columns: list[dict] | None = None
+        if filters or select:
+            columns = await self.get_list_columns(site_id, list_id)
+
         clauses: list[str] = []
         if filters:
-            columns = await self.get_list_columns(site_id, list_id)
             for field, value in filters:
                 if not _FIELD_NAME_RE.match(field):
                     raise GraphAPIError(
@@ -507,7 +540,20 @@ class SharePointService:
                 _check_search_value_type(field, value, expected, label)
                 clauses.append(f"fields/{field} eq {_to_odata_literal(value)}")
 
-        params = ["$expand=fields", f"$top={top}"]
+        if select:
+            for name in select:
+                if not _FIELD_NAME_RE.match(name):
+                    raise GraphAPIError(
+                        400,
+                        f"Nombre de columna inválido en select: {name!r}. Debe ser "
+                        "el nombre interno de la columna (solo letras, dígitos y '_').",
+                    )
+                _validate_select_column(columns, name)
+            expand = f"$expand=fields($select={','.join(select)})"
+        else:
+            expand = "$expand=fields"
+
+        params = [expand, f"$top={top}"]
         if clauses:
             params.append("$filter=" + quote(" and ".join(clauses), safe=""))
         if order_by:

@@ -454,7 +454,7 @@ def test_search_round_trip(wired_client):
 
     fake_resolver.resolve_list = _resolve_list
 
-    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, select=None, top=100):
         received.update(
             site_id=site_id, list_id=list_id, filters=filters, order_by=order_by, top=top
         )
@@ -507,7 +507,7 @@ def test_search_without_filters_passes_none(wired_client):
 
     fake_resolver.resolve_list = _resolve_list
 
-    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, select=None, top=100):
         received.update(filters=filters, top=top)
         return [], False
 
@@ -528,7 +528,7 @@ def test_search_empty_filters_array_equals_omitted(wired_client):
 
     fake_resolver.resolve_list = _resolve_list
 
-    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, select=None, top=100):
         received.update(filters=filters)
         return [], False
 
@@ -548,7 +548,7 @@ def test_search_order_by_passed_as_tuple(wired_client):
 
     fake_resolver.resolve_list = _resolve_list
 
-    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, select=None, top=100):
         received.update(order_by=order_by)
         return [], False
 
@@ -636,6 +636,72 @@ def test_search_top_out_of_range_returns_422(wired_client, bad_top):
 
     resp = client.post(
         _SEARCH_URL, json={"sharepoint_url": _LIST_URL, "top": bad_top}
+    )
+
+    assert resp.status_code == 422
+
+
+def test_search_select_passed_through(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, select=None, top=100):
+        received.update(select=select)
+        return [], False
+
+    fake_sp.search_list_items = fake_search
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={"sharepoint_url": _LIST_URL, "select": ["Title", "Entorno"]},
+    )
+
+    assert resp.status_code == 200
+    assert received["select"] == ["Title", "Entorno"]
+
+
+def test_search_empty_select_passes_none(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, select=None, top=100):
+        received.update(select=select)
+        return [], False
+
+    fake_sp.search_list_items = fake_search
+
+    resp = client.post(
+        _SEARCH_URL, json={"sharepoint_url": _LIST_URL, "select": []}
+    )
+
+    assert resp.status_code == 200
+    assert received["select"] is None
+
+
+@pytest.mark.parametrize("bad_name", ["Title eq 'x'", "fields/Other", "a-b", ""])
+def test_search_select_invalid_name_returns_422(wired_client, bad_name):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={"sharepoint_url": _LIST_URL, "select": [bad_name]},
+    )
+
+    assert resp.status_code == 422
+
+
+def test_search_select_more_than_50_returns_422(wired_client):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={"sharepoint_url": _LIST_URL, "select": [f"C{i}" for i in range(51)]},
     )
 
     assert resp.status_code == 422

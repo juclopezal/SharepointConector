@@ -2,7 +2,7 @@
 
 Microservicio REST que reemplaza Power Automate para operaciones sobre SharePoint vía Microsoft Graph API. Expone una API genérica y versionada que opera sobre cualquier site, lista y biblioteca de documentos de forma dinámica.
 
-**Versión actual:** 2.4.0
+**Versión actual:** 2.5.0
 
 ---
 
@@ -52,7 +52,7 @@ Ver [ARQUITECTURA.md](ARQUITECTURA.md) para la referencia completa.
 ### Health
 
 ```
-GET /health  →  { "status": "ok", "service": "SharePoint Connector", "version": "2.4.0" }
+GET /health  →  { "status": "ok", "service": "SharePoint Connector", "version": "2.5.0" }
 ```
 
 ---
@@ -169,6 +169,17 @@ curl -X POST "http://localhost:8003/v1/sharepoint/list/items:search" \
   que superan el **umbral de vista** de SharePoint (~5000 filas), Graph rechaza
   ordenar por columnas no indexadas (`notSupported`, error propagado con detalle);
   usa columnas indexadas como `Created`, `Modified` o `ID`.
+- `select` (opcional, hasta 50 nombres): proyecta el `fields` de cada ítem a **solo
+  esas columnas** — útil cuando la lista tiene muchos campos y solo se usan unos pocos:
+
+  ```json
+  "select": ["Title", "Entorno", "_x00da_ltima"]
+  ```
+
+  Columna inexistente en `select` → `400` (Graph la ignoraría en silencio; el conector
+  no). Las columnas lookup admiten ambas formas: el nombre base (valor visible) y
+  `{Columna}LookupId` (ID numérico). Omitido o `[]` → todos los campos. Graph puede
+  incluir además claves de sistema (p. ej. `@odata.etag`) dentro de `fields`.
 - `top` (1–5000, default 100): acota el resultado siguiendo la paginación de Graph;
   la respuesta incluye `has_more` si quedaron coincidencias fuera del corte.
 

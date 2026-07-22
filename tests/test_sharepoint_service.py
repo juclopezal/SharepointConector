@@ -431,3 +431,74 @@ async def test_search_exact_top_without_next_link_has_more_false(sp):
 
     assert len(items) == 3
     assert has_more is False
+
+
+# ----------------------------------------------------------------------
+# search_list_items — proyección con select ($select)
+# ----------------------------------------------------------------------
+
+
+async def test_search_select_builds_projected_expand(sp):
+    captured = _wire_search(sp)
+    await sp.search_list_items(
+        "SITE", "LIST", select=["Title", "Entorno", "_x00da_ltima"]
+    )
+
+    url = captured["urls"][-1]
+    assert "$expand=fields($select=Title,Entorno,_x00da_ltima)" in url
+    assert "$expand=fields&" not in url
+
+
+async def test_search_without_select_keeps_plain_expand(sp):
+    captured = _wire_search(sp)
+    await sp.search_list_items("SITE", "LIST", filters=[("Entorno", "L02")])
+
+    assert "$expand=fields&" in captured["urls"][-1]
+    assert "$select" not in captured["urls"][-1]
+
+
+async def test_search_empty_select_equals_omitted(sp):
+    captured = _wire_search(sp)
+    await sp.search_list_items("SITE", "LIST", select=[])
+
+    assert "$expand=fields&" in captured["urls"][-1]
+    # sin filtros ni select efectivo, no hace falta el esquema de columnas
+    assert captured["columns_calls"] == 0
+
+
+async def test_search_select_unknown_column_rejected_naming_it(sp):
+    # Graph ignora en silencio los nombres desconocidos en $select — aquí es 400
+    _wire_search(sp)
+    with pytest.raises(GraphAPIError) as exc:
+        await sp.search_list_items("SITE", "LIST", select=["NoExisteXyz"])
+    assert exc.value.status_code == 400
+    assert "NoExisteXyz" in exc.value.message
+
+
+async def test_search_select_accepts_both_lookup_forms(sp):
+    # asimetría deliberada con los filtros: en select la columna lookup base
+    # también es válida (proyecta el valor visible)
+    captured = _wire_search(sp)
+    await sp.search_list_items(
+        "SITE", "LIST",
+        select=["Cliente_x002d_LIBSA", "Cliente_x002d_LIBSALookupId"],
+    )
+
+    assert (
+        "$select=Cliente_x002d_LIBSA,Cliente_x002d_LIBSALookupId"
+        in captured["urls"][-1]
+    )
+
+
+async def test_search_select_invalid_name_rejected_in_service(sp):
+    _wire_search(sp)
+    with pytest.raises(GraphAPIError) as exc:
+        await sp.search_list_items("SITE", "LIST", select=["a-b"])
+    assert exc.value.status_code == 400
+
+
+async def test_search_select_only_fetches_columns_once(sp):
+    captured = _wire_search(sp)
+    await sp.search_list_items("SITE", "LIST", select=["Title"])
+
+    assert captured["columns_calls"] == 1
