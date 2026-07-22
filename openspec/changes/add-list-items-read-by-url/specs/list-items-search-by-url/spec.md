@@ -189,6 +189,50 @@ at the service layer before being interpolated into the Graph filter expression.
   "Explicit empty filters array" scenario above; only exceeding the maximum is a
   `422`
 
+### Requirement: Field projection via select
+The system SHALL accept an optional `select` array of up to 50 column internal
+names. When present and non-empty, each returned item's `fields` SHALL contain
+only the requested columns (plus any system metadata keys Microsoft Graph always
+includes, such as `@odata.etag`), translated internally to
+`$expand=fields($select=...)`. When `select` is omitted or an empty array, the
+system SHALL return all fields, identical to the pre-projection behavior. Each
+name SHALL be validated against the list's real column schema before calling
+Graph: a nonexistent column in `select` SHALL be rejected with an explicit error
+rather than silently ignored (Microsoft Graph's default for unknown `$select`
+names). Unlike filtering, a base lookup column name IS valid in `select` (it
+projects the display value), in addition to its `{Base}LookupId` form (numeric ID).
+
+#### Scenario: Projection returns only the requested columns
+- **WHEN** the request includes `select: ["Title", "Entorno"]`
+- **THEN** every returned item's `fields` contains `Title` and `Entorno` (when set on
+  the item) and no other list columns, beyond Graph system metadata keys
+
+#### Scenario: Omitted or empty select returns all fields
+- **WHEN** the request omits `select` or sends `"select": []`
+- **THEN** each item's `fields` contains all columns, identical to the behavior
+  before this capability existed
+
+#### Scenario: Nonexistent column in select is rejected
+- **WHEN** `select` includes a name that matches no column on the resolved list
+- **THEN** the response is `400` naming the offending column, and the request never
+  reaches Graph with a silently-dropped `$select` name
+
+#### Scenario: Both lookup forms are selectable
+- **WHEN** `select` includes a base lookup column name (e.g. `Cliente_x002d_LIBSA`)
+  or its `{Base}LookupId` form
+- **THEN** both are accepted — the base name projects the display value and the
+  `LookupId` form the numeric ID — in contrast with filters, where the base name is
+  rejected
+
+#### Scenario: Invalid select name pattern is rejected at the schema layer
+- **WHEN** a `select` entry contains characters other than letters, digits, or
+  underscore
+- **THEN** the response is `422`
+
+#### Scenario: Select above the allowed size is rejected
+- **WHEN** `select` contains more than `50` entries
+- **THEN** the response is `422`
+
 ### Requirement: Search response shape
 The system SHALL respond `200` with `{ total, items, has_more, site_id, list_id }`,
 where `items` is an array of `{ id, webUrl, fields }` for each returned item, and

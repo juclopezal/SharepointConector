@@ -143,3 +143,50 @@
       --pull` over SSH, then verify `http://localhost:8001/health` on that host.
       Optionally update the GitHub remote URL to the double-`n`
       `SharepointConnector.git` name.
+
+## 9. Select projection — schema + service (v2.5.0)
+
+- [ ] 9.1 Add `select: list[str] | None = None` to `ListItemsSearchByUrlRequest`
+      (`max_length=50`, no `min_length` — `[]` ≡ omitted, mirroring `filters`; each
+      entry pattern `^[A-Za-z0-9_]+$`).
+- [ ] 9.2 Service: validate each `select` name at the service layer
+      (`_FIELD_NAME_RE` re-check) and against the cached column schema — nonexistent
+      column → `GraphAPIError(400)` naming it. Accept BOTH lookup forms (base name
+      → display value; `{Base}LookupId` → numeric ID), per design.md decision 9.
+- [ ] 9.3 Service: when `select` is non-empty, build
+      `$expand=fields($select=Col1,Col2,...)` instead of `$expand=fields`
+      (percent-encode as needed); omitted/empty → unchanged `$expand=fields`.
+
+## 10. Select projection — tests
+
+- [ ] 10.1 Unit tests: `$expand=fields($select=...)` URL construction; omitted and
+      `[]` produce plain `$expand=fields` (backward compat).
+- [ ] 10.2 Unit tests: nonexistent column in `select` → 400 naming it; base lookup
+      name accepted; `{Base}LookupId` accepted.
+- [ ] 10.3 Schema tests: entry with invalid pattern → 422; >50 entries → 422;
+      endpoint round trip passing `select` through to the service.
+- [ ] 10.4 Full suite (`pytest`) green, no regressions.
+
+## 11. Select projection — docs & version
+
+- [ ] 11.1 README.md: document `select` in the items:search section (+ example).
+- [ ] 11.2 ARQUITECTURA.md: extend the items:search subsection (projection,
+      validation, lookup asymmetry with filters, system metadata keys note).
+- [ ] 11.3 doc/CHANGELOG.md: `## v2.5.0` entry; bump `VERSION` to `2.5.0`; update
+      version headers in README/ARQUITECTURA/arquitecturasUML.
+- [ ] 11.4 requirements/SPEC-004: append the select requirement + bitácora entry
+      (no separate SPEC-005, per design.md decision 9).
+
+## 12. Select projection — empirical verification (DSL list)
+
+- [ ] 12.1 Local Docker rebuild; `/health` reports 2.5.0.
+- [ ] 12.2 DSL list: `select: ["Title", "Entorno", "_x00da_ltima"]` with a filter →
+      inspect the actual keys of `fields` in returned items: only those columns plus
+      whatever system keys Graph includes (record the exact system-key set, e.g.
+      `@odata.etag`, in SPEC-004/ARQUITECTURA).
+- [ ] 12.3 DSL list: nonexistent column in `select` → 400 naming it (NOT a 200 with
+      the name silently dropped).
+- [ ] 12.4 DSL list: `select` with base lookup name (`Cliente_x002d_LIBSA`) returns
+      display values; with `Cliente_x002d_LIBSALookupId` returns numeric IDs.
+- [ ] 12.5 Manual post-merge follow-up: push + `deploy.sh update --pull` on
+      docker-ag; verify 2.5.0 on that host.

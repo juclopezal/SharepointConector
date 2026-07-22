@@ -28,7 +28,13 @@ boolean SharePoint columns (Graph ignores `eq true`/`eq false` clauses without e
   results are exhausted, and reports `has_more` when rows were left out.
 - Request model uses `extra="forbid"`: no legacy `filter_by`-style field carries over from
   the update/upsert endpoints, and any unrecognized body field is a `422`, not a silent no-op.
-- **BREAKING**: none — this is a net-new endpoint; no existing endpoint changes shape.
+- **Second iteration (v2.5.0), owner-approved 2026-07-22**: optional `select` field —
+  array of column internal names projecting each returned item's `fields` to only those
+  columns (Graph `$expand=fields($select=...)`). Omitted → all fields, fully backward
+  compatible. Names are schema-validated like filter fields (Graph silently ignores unknown
+  names in `$select`, hiding caller typos — same silent-failure mode this change eliminates).
+- **BREAKING**: none — this is a net-new endpoint; no existing endpoint changes shape, and
+  the `select` iteration is additive over v2.4.0.
 
 ## Capabilities
 
@@ -56,6 +62,7 @@ this change only adds a new read/search capability alongside them._
 - **No changes** to `app/services/resolver.py` (`resolve_list()` reused as-is) or to any
   existing endpoint/schema.
 - **Docs**: README.md, ARQUITECTURA.md, arquitecturasUML.md, doc/CHANGELOG.md, VERSION
-  (minor bump from 2.3.0), new `requirements/SPEC-004_*.md`.
+  (minor bump from 2.3.0), new `requirements/SPEC-004_*.md`. The `select` iteration bumps
+  to 2.5.0 and extends SPEC-004 (same endpoint, no separate SPEC-005).
 - **Deployment**: manual post-merge step in both local Docker Desktop and the remote
   `docker-ag` host — not automated by this change's tasks.

@@ -142,6 +142,32 @@ depth, consistent with `find_list_items_by_field`/`find_list_items_for_upsert`).
 `len(items)` *after* truncation (matches proposal), not the count of all Graph-side matches
 (which is never fully known when `has_more` is true, by design — no full-count query is made).
 
+### 9. `select` projection (v2.5.0 iteration) — schema-validated, `[]` ≡ omitted
+Added after v2.4.0 shipped, owner-approved 2026-07-22. Optional `select: list[str]`
+(`max_length=50`, no `min_length`) projecting each item's `fields` to only the named
+columns via `$expand=fields($select=Col1,Col2)`; omitted (or `[]`, mirroring the
+`filters: []` decision) keeps today's `$expand=fields` — fully backward compatible.
+
+- **Validation mirrors filters**: names pass `[A-Za-z0-9_]+` in both layers (schema 422 +
+  service 400) and are checked against the cached column schema — a nonexistent column is
+  a `400` naming it, because Graph *silently ignores* unknown names in `$select` (item
+  returned, no error), which would hide caller typos: the same silent-failure mode
+  requirement 4 eliminated for filters.
+- **Lookup asymmetry with filters — deliberate**: in `select`, BOTH forms are valid —
+  the base lookup column name (e.g. `Cliente_x002d_LIBSA`, Graph returns its display
+  value) and the `{Base}LookupId` synthetic field (returns the numeric ID). This differs
+  from filters, where the base name is rejected with `400`: *filtering* on a base lookup
+  column is unreliable in Graph (silently wrong results), but *selecting* it works and is
+  useful. The design flags this asymmetry explicitly so it reads as intentional, not an
+  oversight.
+- **System metadata keys**: Graph may still include bookkeeping keys (e.g. `@odata.etag`)
+  inside `fields` even under `$select`. The contract is "only the requested columns plus
+  Graph system metadata"; the exact key set is confirmed during empirical verification and
+  documented, not guessed.
+- **No response-shape change**: `items[].fields` simply has fewer keys; `total`/`has_more`
+  semantics untouched. Version bumps to 2.5.0; SPEC-004 is extended (same endpoint) rather
+  than opening a SPEC-005.
+
 ## Risks / Trade-offs
 
 - **[Risk]** TTL cache can serve stale columns for up to the TTL window after a real schema
@@ -171,6 +197,8 @@ depth, consistent with `find_list_items_by_field`/`find_list_items_for_upsert`).
 - Purely additive: new route, new schemas, new service methods, one new cache. No changes to
   existing endpoints, schemas, or stored data — nothing to migrate or backfill.
 - Deploy as a minor version bump (2.3.0 → 2.4.0) in `VERSION`, `doc/CHANGELOG.md`.
+  The `select` iteration (decision 9) is a further minor bump (2.4.0 → 2.5.0), equally
+  additive: no migration, same rollout/rollback procedure.
 - Rollout is manual and environment-specific (see proposal's Impact section): local Docker
   Desktop rebuild, then a separate commit+push+`deploy.sh update --pull` cycle on `docker-ag`.
   Rollback is reverting the commit and redeploying the previous image on `docker-ag`; no data
