@@ -1,7 +1,7 @@
 # Arquitectura: SharePoint Connector
 
-**Versión:** 2.3.0  
-**Fecha:** 2026-06-18  
+**Versión:** 2.4.0  
+**Fecha:** 2026-07-22  
 **Autor:** Juan Camilo López Alzate — Latinia  
 
 ---
@@ -76,7 +76,7 @@ graph TD
         EP_DISC["discovery.py\nGET /sites\nGET /sites/{id}/lists\nGET /sites/{id}/drives\nGET /sites/{id}/drives/{id}/items"]
         EP_LIST["list_items.py\nGET  /sites/{id}/lists/{id}/items\nPOST /sites/{id}/lists/{id}/items"]
         EP_FILE["files.py\nPOST /sites/{id}/drives/{id}/files\nGET  /sites/{id}/drives/{id}/items/{id}\nGET  /sites/{id}/drives/{id}/items/{id}/download"]
-        EP_SP["sharepoint.py (by URL)\nPOST  /sharepoint/list/item\nPATCH /sharepoint/list/item\nPOST  /sharepoint/list/item:upsert\nPOST  /sharepoint/upload"]
+        EP_SP["sharepoint.py (by URL)\nPOST  /sharepoint/list/item\nPATCH /sharepoint/list/item\nPOST  /sharepoint/list/item:upsert\nPOST  /sharepoint/list/items:search\nPOST  /sharepoint/upload"]
     end
 
     subgraph "app/core"
@@ -130,9 +130,9 @@ graph TD
 | **Discovery** | `app/api/v1/endpoints/discovery.py` | Endpoints de exploración (sites, listas, drives, carpetas) |
 | **List Items** | `app/api/v1/endpoints/list_items.py` | Lectura y creación de ítems en listas |
 | **Files** | `app/api/v1/endpoints/files.py` | Subida, metadata y descarga de archivos |
-| **SharePoint (by URL)** | `app/api/v1/endpoints/sharepoint.py` | Endpoints orientados a usuario: crear / actualizar / *upsert* de ítem y subir archivo a partir de una URL |
+| **SharePoint (by URL)** | `app/api/v1/endpoints/sharepoint.py` | Endpoints orientados a usuario: crear / actualizar / *upsert* / búsqueda multi-campo de ítems y subir archivo a partir de una URL |
 | **Schemas** | `app/schemas/` | Modelos Pydantic de request/response por dominio |
-| **SharePointService** | `app/services/sharepoint.py` | Cliente HTTP de Graph API (GET, POST, PATCH, PUT, descarga, búsqueda y actualización de ítems, resolución de site) |
+| **SharePointService** | `app/services/sharepoint.py` | Cliente HTTP de Graph API (GET, POST, PATCH, PUT, descarga, búsqueda y actualización de ítems, resolución de site, esquema de columnas con caché TTL) |
 | **Period** | `app/services/period.py` | Traducción del `period` del upsert (atajo con nombre o rango explícito) a un intervalo UTC, calculado en la zona horaria del tenant |
 | **SharePointResolver** | `app/services/resolver.py` | Traducción de URLs de SharePoint a `site_id`/`list_id`/`drive_id`+carpeta |
 
@@ -150,7 +150,7 @@ El conector expone dos niveles de API bajo `/v1`:
 `SharePointResolver` traduce una URL "humana" de SharePoint a los identificadores que Graph necesita:
 
 1. **Site:** se intenta `GET /sites/{host}:/{path}` con la ruta de la URL y, ante un `404`, se recorta el último segmento y se reintenta hacia la raíz. El primer path que resuelve es el *web* más profundo que contiene el recurso. Cubre de forma uniforme la raíz, managed paths (`/Oper`), `/sites/{x}`, `/teams/{x}` y subsites anidados. Los IDs de site resueltos se cachean (son estables).
-2. **Lista** (`POST`, `PATCH` y `POST .../list/item:upsert`): se localiza el segmento tras `/Lists/` y se empareja contra las listas del site por `webUrl` (coincidencia exacta) con fallback a `displayName`/`name`. La misma resolución sirve para crear (`POST`), actualizar (`PATCH`) y el upsert.
+2. **Lista** (`POST`, `PATCH`, `POST .../list/item:upsert` y `POST .../list/items:search`): se localiza el segmento tras `/Lists/` y se empareja contra las listas del site por `webUrl` (coincidencia exacta) con fallback a `displayName`/`name`. La misma resolución sirve para crear (`POST`), actualizar (`PATCH`), el upsert y la búsqueda.
 3. **Biblioteca y carpeta** (`POST /v1/sharepoint/upload`): la carpeta destino se toma del parámetro `?id=` (ruta servidor) o de la propia ruta sin la página de formulario. La biblioteca es el drive cuyo `webUrl` es el prefijo más largo de esa ruta; el resto es la carpeta destino (que se crea automáticamente al subir).
 
 ```mermaid
@@ -243,6 +243,55 @@ El filtro combina con `and`: igualdad exacta sobre `key_field` y, si se indica `
 ```
 
 > A diferencia del `PATCH`, varias coincidencias **no** son error: la decisión de negocio es actualizar la primera y emitir un `warning` para detectar duplicados preexistentes.
+
+#### `POST /v1/sharepoint/list/items:search`
+
+Búsqueda de ítems con hasta **15 condiciones de igualdad combinadas con AND**, validadas contra el esquema real de la lista. Generaliza el filtro clave+fecha del upsert a N campos con valores **tipados**.
+
+**Request:**
+```json
+{
+  "sharepoint_url": "https://host.sharepoint.com/Oper/Lists/DSL/Allitemsg.aspx",
+  "filters": [
+    { "field": "Entorno", "value": "L02" },
+    { "field": "_x00da_ltima", "value": true }
+  ],
+  "order_by": { "field": "Created", "direction": "desc" },
+  "top": 100
+}
+```
+
+`filters`, `order_by` y `top` son opcionales; sin `filters` (u `[]`) se devuelven los primeros `top` ítems sin filtrar. El request usa `extra="forbid"`: cualquier campo desconocido (p. ej. un `filter_by` de otros endpoints) → `422`, nunca ignorado en silencio.
+
+**Traducción de valores a literal OData** (interna, invisible para el caller):
+
+| Tipo JSON de `value` | Literal OData | Nota |
+|---|---|---|
+| string | `'texto'` (comillas internas duplicadas: `'O''Hara'`) | igual que el resto de endpoints |
+| boolean | **`1` / `0`** — nunca `true`/`false` | Graph **ignora en silencio** `eq true\|false` (y `eq 'true'`) sobre columnas Sí/No: devuelve todas las filas sin error. `eq 1`/`eq 0` sí filtra. Verificado empíricamente contra la lista DSL (2026-07-22). |
+| entero / decimal | literal sin comillas | |
+
+**Validación contra el esquema de columnas** (anti-"ignorado en silencio"): antes de construir el `$filter`, el conector consulta `GET /sites/{id}/lists/{id}/columns` — cacheado por `(site_id, list_id)` con **TTL de 300 s** (a diferencia del caché de sites, sin caducidad, porque las columnas pueden cambiar) — y valida cada condición:
+
+| Condición | Respuesta |
+|---|---|
+| Campo inexistente en la lista | `400` nombrando el campo |
+| Tipo JSON ≠ tipo de columna (string contra Sí/No, texto contra numérica, …) | `400` explicando el tipo esperado (sin coerción) |
+| Columna lookup referenciada por su nombre base | `400` — debe usarse `{Columna}LookupId` con el ID numérico |
+| `{Columna}LookupId` de una columna lookup | aceptado, tipo esperado: entero |
+| Valor bien tipado que no coincide con ninguna fila | `200` con `total: 0` (no es error) |
+
+La expresión completa se percent-encodea y se envía con `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly`; los nombres de campo se validan contra `[A-Za-z0-9_]+` en doble capa (schema `422` + servicio `400`, anti-inyección OData).
+
+**`order_by`** → `$orderby=fields/{field} asc|desc`. **Limitación conocida:** en listas que superan el umbral de vista de SharePoint (~5000 filas), Graph responde `notSupported` al ordenar por columnas no indexadas; el error se propaga con su detalle. Recomendación: ordenar por columnas indexadas (`Created`, `Modified`, `ID`).
+
+**`top`** (1–5000, default 100): Graph trata `$top` como tamaño de página, no como límite total, así que el conector sigue `@odata.nextLink` solo hasta reunir `top` ítems y trunca el excedente. `has_more: true` indica que el corte dejó fuera filas coincidentes. (Paginación por cursor: evaluada y pospuesta conscientemente; añadirla después es retrocompatible.)
+
+**Response 200:**
+```json
+{ "total": 2, "items": [ { "id": "7", "webUrl": "https://...", "fields": { "Entorno": "L02", "_x00da_ltima": true } } ],
+  "has_more": false, "site_id": "...", "list_id": "..." }
+```
 
 #### `POST /v1/sharepoint/upload`
 

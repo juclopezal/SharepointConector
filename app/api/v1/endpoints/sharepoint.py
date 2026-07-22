@@ -19,6 +19,9 @@ from app.schemas.sharepoint import (
     ExplicitPeriod,
     ListItemByUrlRequest,
     ListItemByUrlResponse,
+    ListItemsSearchByUrlItem,
+    ListItemsSearchByUrlRequest,
+    ListItemsSearchByUrlResponse,
     ListItemUpdateByUrlRequest,
     ListItemUpdateByUrlResponse,
     UpsertListItemRequest,
@@ -230,6 +233,77 @@ async def upsert_list_item_by_url(
         site_id=resolved.site_id,
         list_id=resolved.list_id,
         matched=len(matches),
+    )
+
+
+@router.post(
+    "/list/items:search",
+    response_model=ListItemsSearchByUrlResponse,
+    summary="Buscar ítems de una lista con filtros multi-campo (AND)",
+)
+async def search_list_items_by_url(
+    payload: ListItemsSearchByUrlRequest,
+    sp: SharePointService = Depends(get_sp),
+    resolver: SharePointResolver = Depends(get_resolver),
+):
+    """Busca ítems de la lista identificada por `sharepoint_url`.
+
+    Filtros (`filters`, opcional, hasta 15): condiciones `{field, value}` de
+    igualdad combinadas con **AND**. Cada condición se valida contra el esquema
+    real de la lista: campo inexistente o tipo que no corresponde a la columna →
+    `400` explícito (nunca una cláusula ignorada en silencio). El `value` viaja
+    en su tipo JSON natural — los booleanos como `true`/`false` sin comillas —
+    y el conector lo traduce internamente al literal OData correcto. Sin
+    `filters` (u `[]`), se devuelven los primeros `top` ítems.
+
+    Las columnas lookup se filtran por su campo `{Columna}LookupId` con el ID
+    numérico del elemento referenciado.
+
+    `order_by` (opcional): `$orderby` de Graph. En listas que superan el umbral
+    de vista de SharePoint (~5000 filas), Graph rechaza ordenar por columnas no
+    indexadas (`notSupported`); el error se propaga con su detalle — usa
+    columnas indexadas como `Created`, `Modified` o `ID`.
+
+    `top` (1–5000, por defecto 100) acota el resultado siguiendo la paginación
+    de Graph; `has_more` indica si quedaron filas coincidentes fuera del corte.
+    0 coincidencias → `200` con `total: 0`.
+    """
+    logger.info(
+        "search_list_items_by_url → url=%r filters=%d order_by=%r top=%d",
+        payload.sharepoint_url,
+        len(payload.filters or []),
+        (payload.order_by.field, payload.order_by.direction)
+        if payload.order_by
+        else None,
+        payload.top,
+    )
+    resolved = await resolver.resolve_list(payload.sharepoint_url)
+    filters = [(f.field, f.value) for f in (payload.filters or [])]
+    order_by = (
+        (payload.order_by.field, payload.order_by.direction)
+        if payload.order_by
+        else None
+    )
+    items, has_more = await sp.search_list_items(
+        resolved.site_id,
+        resolved.list_id,
+        filters=filters or None,
+        order_by=order_by,
+        top=payload.top,
+    )
+    return ListItemsSearchByUrlResponse(
+        total=len(items),
+        items=[
+            ListItemsSearchByUrlItem(
+                id=str(it["id"]),
+                webUrl=it.get("webUrl"),
+                fields=it.get("fields", {}),
+            )
+            for it in items
+        ],
+        has_more=has_more,
+        site_id=resolved.site_id,
+        list_id=resolved.list_id,
     )
 
 

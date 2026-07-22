@@ -1,0 +1,66 @@
+schema: spec-driven
+context: |
+  Idea del proyecto: Gestor de proyectos con Proyectos, Tareas y Miembros
+  Stack tecnológico: Node.js, Express, Supabase (cliente @supabase/supabase-js)
+  Autenticación: Login básico vía Supabase Auth, sin roles diferenciados
+    (cualquier usuario autenticado tiene las mismas capacidades generales;
+    los permisos específicos dependen de la relación con el recurso, no de un rol)
+  Autorización a nivel de datos: Row Level Security (RLS) de Supabase
+    - Las políticas de acceso (quién puede leer/escribir qué fila) se definen en RLS,
+      no reimplementadas manualmente en el código de Express
+    - El backend confía en RLS como última línea de defensa, pero las reglas de
+      negocio (ver abajo) también deben reflejarse en la lógica de la aplicación
+      cuando afecten la experiencia del usuario (mensajes de error, validaciones previas)
+
+  Modelo de entidades:
+  - Usuario: id, nombre, email, password (gestionado por Supabase Auth)
+  - Proyecto: id, nombre, descripción, estado (activo | archivado), fecha_creacion, dueño_id
+  - Miembro: tabla intermedia (proyecto_id, usuario_id) — relación muchos-a-muchos
+    entre Usuario y Proyecto
+  - Tarea: id, titulo, descripcion, estado (pendiente | en_progreso | completada),
+    fecha_limite, proyecto_id, asignado_a (nullable, referencia a Miembro)
+
+  Reglas de negocio:
+  - Solo el dueño del proyecto puede eliminarlo o archivarlo
+  - No se puede eliminar un proyecto si tiene tareas activas (pendiente o en_progreso)
+  - Solo un miembro del proyecto puede tener tareas asignadas dentro de ese proyecto
+  - Una tarea no puede pasar a estado "completada" si el proyecto está archivado
+  - Un usuario no puede ser eliminado como miembro si tiene tareas asignadas sin reasignar
+
+  Lenguaje de producto:
+  - Escribe los requisitos en términos de lo que el usuario final observa
+    (qué puede hacer, qué respuesta recibe, qué error ve), no en términos de
+    tablas, políticas RLS o queries de Supabase
+  - Evita mencionar el nombre exacto de columnas o tablas en los requisitos de negocio;
+    eso pertenece a design.md
+  - Prefiere expresar las reglas como resultados positivos del usuario
+    ("un proyecto archivado impide completar tareas") en vez de negaciones técnicas
+    ("el sistema NO permitirá un UPDATE si...")
+
+rules:
+  specs:
+    - "Cada endpoint debe documentar caso feliz y al menos un caso de error (400, 401, 403, 404, 409)"
+    - "Especificar código HTTP esperado para cada escenario observable"
+    - "Las 5 reglas de negocio deben aparecer como escenarios explícitos en specs de Proyecto y Tarea"
+    - "No mencionar RLS, políticas de Supabase, ni nombres de tablas; solo comportamiento observable del usuario"
+    - "Cuando una operación depende de la relación usuario-proyecto (dueño vs miembro vs no relacionado), cubrir los 3 casos"
+    - "Describir qué ve el usuario en cada respuesta (mensaje de error amigable, no códigos internos)"
+    - "Incluir escenarios de validación previa (ej: no puedo completar tarea si proyecto está archivado)"
+
+  tasks:
+    - "Incluir tarea explícita para setup de Supabase Auth (crear auth provider, configurar JWT)"
+    - "Incluir tarea para definición de políticas RLS por tabla (usuarios, proyectos, miembros, tareas)"
+    - "Incluir tarea de creación de esquema: 4 tablas con llaves foráneas y constraints exactos"
+    - "Incluir tarea de seed/datos de prueba para validar las 5 reglas de negocio manualmente"
+    - "Incluir tarea de middleware de autenticación (validar token JWT en cada request)"
+    - "Incluir tarea de documentación de API (endpoints, payloads, respuestas de error, ejemplos)"
+    - "Agrupar tasks por fases: Setup → Auth → CRUD Proyectos → CRUD Miembros → CRUD Tareas → Testing"
+
+  design:
+    - "Documentar esquema exacto de cada tabla (columnas, tipos, llaves foráneas, constraints, índices)"
+    - "Documentar políticas RLS de Supabase que implementan cada regla de negocio (quién puede SELECT/INSERT/UPDATE/DELETE)"
+    - "Documentar qué validaciones ocurren en Express (previas, con mensaje amigable al usuario) vs cuáles quedan a nivel RLS"
+    - "Especificar constraints únicos (ej: unique(proyecto_id, usuario_id) en tabla miembros)"
+    - "Documentar flujo de autenticación: cómo se obtiene token de Supabase, cómo se valida en Express, dónde se guarda"
+    - "No incluir código; solo definiciones, relaciones, políticas y decisiones arquitectónicas"
+    - "Documentar la relación muchos-a-muchos entre Usuario y Proyecto vía tabla Miembro explícitamente"

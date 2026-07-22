@@ -1,7 +1,7 @@
 # Diagramas de Arquitectura (PlantUML): SharePoint Connector
 
-**Versión:** 2.2.0
-**Fecha:** 2026-06-10
+**Versión:** 2.4.0
+**Fecha:** 2026-07-22
 **Autor:** Juan Camilo López Alzate — Latinia
 
 > Versión en **PlantUML** de los diagramas de [`ARQUITECTURA.md`](ARQUITECTURA.md).
@@ -75,7 +75,7 @@ package "app/api/v1/endpoints" {
   component "discovery.py\nGET /sites\nGET /sites/{id}/lists\nGET /sites/{id}/drives\nGET /sites/{id}/drives/{id}/items" as EP_DISC
   component "list_items.py\nGET  /sites/{id}/lists/{id}/items\nPOST /sites/{id}/lists/{id}/items" as EP_LIST
   component "files.py\nPOST /sites/{id}/drives/{id}/files\nGET  /sites/{id}/drives/{id}/items/{id}\nGET  /sites/{id}/drives/{id}/items/{id}/download" as EP_FILE
-  component "sharepoint.py (by URL)\nPOST  /sharepoint/list/item\nPATCH /sharepoint/list/item\nPOST  /sharepoint/upload" as EP_SP
+  component "sharepoint.py (by URL)\nPOST  /sharepoint/list/item\nPATCH /sharepoint/list/item\nPOST  /sharepoint/list/item:upsert\nPOST  /sharepoint/list/items:search\nPOST  /sharepoint/upload" as EP_SP
 }
 
 package "app/core" {
@@ -132,7 +132,7 @@ component "SharePointResolver" as R
 component "site_id" as SID
 component "list_id" as LID
 component "drive_id + carpeta" as DID
-component "SharePointService\ncreate_list_item / update_list_item / upload_file" as SRV
+component "SharePointService\ncreate_list_item / update_list_item /\nsearch_list_items (+ get_list_columns) / upload_file" as SRV
 
 URL --> R
 R --> SID : GET /sites/host:/path\nrecorte hacia raíz

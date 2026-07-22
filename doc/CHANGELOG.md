@@ -1,3 +1,41 @@
+## v2.4.0 — 2026-07-22
+
+### Feature: Búsqueda multi-campo de ítems de lista (SPEC-004)
+
+**Contexto:** El conector permitía crear, actualizar (por un campo único) y hacer upsert (clave + periodo) de ítems por URL, pero no **leer/buscar** por varios campos a la vez sin construir a mano un `$filter` OData contra `/v1/graph/...`. Además, el primitivo más cercano (`find_list_items_by_field`) trata todo valor como string, lo que produce resultados **silenciosamente incorrectos** con columnas Sí/No: Graph ignora sin error las cláusulas `eq true|false` (y `eq 'true'`) sobre esas columnas y devuelve todas las filas como si el filtro no existiera.
+
+**Solución:** Nuevo `POST /v1/sharepoint/list/items:search` — hasta 15 condiciones de igualdad combinadas con **AND**, valores **tipados** y validación previa contra el esquema real de la lista.
+
+```json
+{
+  "sharepoint_url": "https://host.sharepoint.com/Oper/Lists/DSL/Allitemsg.aspx",
+  "filters": [
+    { "field": "Entorno", "value": "L02" },
+    { "field": "_x00da_ltima", "value": true }
+  ],
+  "top": 100
+}
+```
+
+- **Booleano → `1`/`0`, nunca `true`/`false`** (verificado empíricamente contra la lista DSL, 2026-07-22): el caller envía booleanos JSON puros y el conector los traduce internamente al único literal OData que filtra de verdad las columnas Sí/No. String → `'texto'` con comillas duplicadas; número → literal sin comillas.
+- **Validación contra el esquema de columnas** (`GET .../columns`, caché por `(site_id, list_id)` con TTL 300 s): campo inexistente → `400` nombrándolo; tipo JSON ≠ tipo de columna → `400` con el tipo esperado (sin coerción); columna lookup por su nombre base → `400` (debe usarse `{Columna}LookupId`, tipo entero). Valor bien tipado sin coincidencias → `200` con `total: 0`.
+- **`extra="forbid"`**: cualquier campo desconocido del body (p. ej. `filter_by`) → `422`, nunca ignorado.
+- **`order_by`** (`$orderby`): en listas por encima del umbral de vista (~5000 filas) Graph responde `notSupported` al ordenar por columnas no indexadas; el error se propaga con detalle (usar `Created`, `Modified`, `ID`).
+- **`top`** (1–5000, default 100): Graph trata `$top` como tamaño de página; el conector sigue `@odata.nextLink` hasta reunir `top` ítems, trunca el excedente y devuelve `has_more`. Paginación por cursor: pospuesta conscientemente (retrocompatible añadirla).
+- Se mantienen las garantías existentes: validación de campo `[A-Za-z0-9_]+` en doble capa (`422` schema + `400` servicio), percent-encoding de la expresión completa, cabecera `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly`.
+
+**Archivos nuevos:**
+- `requirements/SPEC-004_List_Items_Search_By_Url.md` — especificación de la feature
+
+**Archivos modificados:**
+- `app/services/sharepoint.py` — `_to_odata_literal()`, `_search_field_expected_type()`, `_check_search_value_type()`, `get_list_columns()` (caché TTL 300 s), `_get_bounded()` (paginación acotada), `search_list_items()`
+- `app/schemas/sharepoint.py` — `SearchFilter`, `OrderBy`, `ListItemsSearchByUrlRequest` (extra="forbid"), `ListItemsSearchByUrlItem`, `ListItemsSearchByUrlResponse`
+- `app/api/v1/endpoints/sharepoint.py` — endpoint `POST /v1/sharepoint/list/items:search`
+- `tests/test_sharepoint_service.py`, `tests/test_sharepoint_endpoints.py` — 30 tests nuevos (literales OData, AND multi-campo, validación de esquema, lookup, caché, orderby, truncado/has_more, 422s)
+- `VERSION`, `README.md`, `ARQUITECTURA.md`, `arquitecturasUML.md` — documentación a v2.4.0
+
+---
+
 ## v2.3.0 — 2026-06-18
 
 ### Feature: Upsert genérico de ítems de lista (SPEC-003)

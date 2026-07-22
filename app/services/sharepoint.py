@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from urllib.parse import quote
 
 import httpx
@@ -16,6 +17,94 @@ _TIMEOUT = httpx.Timeout(60.0)
 # Nombres internos de columna de SharePoint: solo alfanuméricos y guion bajo.
 # Evita que un `field` arbitrario inyecte operadores en la expresión $filter.
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+# TTL del caché de definiciones de columna. A diferencia de los site IDs (que no
+# cambian nunca durante la vida del proceso), las columnas de una lista pueden
+# añadirse o renombrarse, así que la copia cacheada caduca.
+_COLUMNS_CACHE_TTL = 300.0
+
+# Sufijo con el que Graph expone las columnas lookup en `fields` (campo sintético
+# numérico que NO aparece como columna propia en GET .../columns).
+_LOOKUP_ID_SUFFIX = "LookupId"
+
+
+def _to_odata_literal(value: "str | bool | int | float") -> str:
+    """Traduce un valor JSON al literal OData que Graph evalúa correctamente.
+
+    Booleanos como ``1``/``0``, NUNCA ``true``/``false``: Graph ignora en
+    silencio las cláusulas ``fields/{col} eq true|false`` (y ``eq 'true'``)
+    sobre columnas Sí/No de SharePoint — devuelve todas las filas como si la
+    condición no existiera, sin error. ``eq 1``/``eq 0`` sí filtra (verificado
+    empíricamente contra la lista DSL el 2026-07-22).
+    """
+    if isinstance(value, bool):  # antes que int/float: bool es subclase de int
+        return "1" if value else "0"
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    return str(value)
+
+
+def _search_field_expected_type(
+    columns: list[dict], field: str
+) -> "tuple[type | tuple[type, ...], str]":
+    """Resuelve ``field`` contra las columnas reales de la lista.
+
+    Devuelve ``(tipos python aceptados, etiqueta del tipo esperado)`` o lanza
+    ``GraphAPIError(400)`` si el campo no existe o es una columna lookup
+    referenciada sin el sufijo ``LookupId`` (Graph no filtra de forma fiable
+    por la columna lookup base; aceptarla reintroduciría el fallo silencioso
+    que este endpoint existe para eliminar).
+    """
+    by_name = {c.get("name"): c for c in columns}
+
+    col = by_name.get(field)
+    if col is not None:
+        if "lookup" in col:
+            raise GraphAPIError(
+                400,
+                f"La columna '{field}' es de tipo lookup y no puede filtrarse "
+                f"directamente; usa el campo '{field}{_LOOKUP_ID_SUFFIX}' con el "
+                "ID numérico del elemento referenciado.",
+            )
+        if "boolean" in col:
+            return bool, "boolean (true/false, sin comillas)"
+        if "number" in col or "currency" in col:
+            return (int, float), "number"
+        return str, "string"
+
+    if field.endswith(_LOOKUP_ID_SUFFIX):
+        base = by_name.get(field[: -len(_LOOKUP_ID_SUFFIX)])
+        if base is not None and "lookup" in base:
+            return int, "integer (LookupId)"
+
+    raise GraphAPIError(
+        400,
+        f"El campo '{field}' no existe en la lista. Debe ser el nombre interno "
+        "de una columna existente.",
+    )
+
+
+def _check_search_value_type(
+    field: str,
+    value: "str | bool | int | float",
+    expected: "type | tuple[type, ...]",
+    label: str,
+) -> None:
+    """Exige que el tipo JSON del valor corresponda al de la columna (sin coerción).
+
+    ``bool`` se comprueba aparte porque es subclase de ``int``: un ``true`` JSON
+    nunca vale como número ni un ``1`` como booleano.
+    """
+    if expected is bool:
+        ok = isinstance(value, bool)
+    else:
+        ok = isinstance(value, expected) and not isinstance(value, bool)
+    if not ok:
+        raise GraphAPIError(
+            400,
+            f"Tipo inválido para el campo '{field}': la columna espera {label} "
+            f"y se recibió {type(value).__name__} ({value!r}).",
+        )
 
 
 def _encode_drive_path(folder: str, filename: str) -> str:
@@ -52,6 +141,9 @@ def _ctx() -> dict:
 class SharePointService:
     def __init__(self, token_manager: TokenManager):
         self._tm = token_manager
+        # Definiciones de columna por (site_id, list_id) → (columns, fetched_at).
+        # Caché con TTL (_COLUMNS_CACHE_TTL); ver get_list_columns().
+        self._columns_cache: dict[tuple[str, str], tuple[list[dict], float]] = {}
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -89,6 +181,28 @@ class SharePointService:
             items.extend(data.get("value", []))
             next_url = data.get("@odata.nextLink")
         return items
+
+    async def _get_bounded(
+        self, url: str, top: int, extra_headers: dict | None = None
+    ) -> tuple[list[dict], bool]:
+        """GET paginado acotado: sigue ``@odata.nextLink`` solo hasta reunir ``top``.
+
+        Graph trata ``$top`` como tamaño de página, no como límite total; sin
+        este corte, una consulta con muchas coincidencias seguiría paginando
+        hasta agotarlas. Devuelve ``(items truncados a top, has_more)``, donde
+        ``has_more`` indica que el corte dejó fuera filas que también coincidían.
+        """
+        items: list[dict] = []
+        has_more = False
+        next_url: str | None = url
+        while next_url:
+            data = await self._get(next_url, extra_headers)
+            items.extend(data.get("value", []))
+            next_url = data.get("@odata.nextLink")
+            if len(items) >= top:
+                has_more = len(items) > top or next_url is not None
+                break
+        return items[:top], has_more
 
     async def _post(self, url: str, body: dict) -> dict:
         logger.debug("Graph POST %s", url, extra={**_ctx(), "graph_url": url})
@@ -330,6 +444,102 @@ class SharePointService:
             extra={**_ctx(), "site_id": site_id, "list_id": list_id},
         )
         return items
+
+    async def get_list_columns(self, site_id: str, list_id: str) -> list[dict]:
+        """Definiciones de columna de la lista, con caché TTL en proceso.
+
+        ``GET /sites/{site_id}/lists/{list_id}/columns``. Se cachea por
+        ``(site_id, list_id)`` durante ``_COLUMNS_CACHE_TTL`` segundos: el
+        esquema es estable pero, a diferencia de los site IDs, puede cambiar
+        (columnas nuevas/renombradas), de ahí la caducidad.
+        """
+        key = (site_id, list_id)
+        now = time.monotonic()
+        cached = self._columns_cache.get(key)
+        if cached and now - cached[1] < _COLUMNS_CACHE_TTL:
+            return cached[0]
+        columns = await self._get_all(
+            f"{GRAPH}/sites/{site_id}/lists/{list_id}/columns"
+        )
+        self._columns_cache[key] = (columns, now)
+        logger.info(
+            "Fetched %d column definitions for list %s",
+            len(columns),
+            list_id,
+            extra={**_ctx(), "site_id": site_id, "list_id": list_id},
+        )
+        return columns
+
+    async def search_list_items(
+        self,
+        site_id: str,
+        list_id: str,
+        *,
+        filters: "list[tuple[str, str | bool | int | float]] | None" = None,
+        order_by: "tuple[str, str] | None" = None,
+        top: int = 100,
+    ) -> tuple[list[dict], bool]:
+        """Busca ítems con 0..N condiciones de igualdad combinadas con ``and``.
+
+        Cada condición se valida contra el esquema real de la lista (columnas
+        vía :meth:`get_list_columns`) antes de construir el ``$filter``: campo
+        inexistente o tipo JSON que no corresponde al de la columna → 400
+        explícito, nunca una cláusula descartada en silencio por Graph. Los
+        valores se traducen a literal OData según su tipo (booleano → ``1``/``0``,
+        ver :func:`_to_odata_literal`).
+
+        ``top`` acota el número de ítems devueltos siguiendo la paginación de
+        Graph (:meth:`_get_bounded`); ``order_by`` añade ``$orderby`` y, si la
+        lista supera el umbral de vista de SharePoint sin un filtro indexado,
+        el error ``notSupported`` de Graph se propaga con su detalle.
+        """
+        clauses: list[str] = []
+        if filters:
+            columns = await self.get_list_columns(site_id, list_id)
+            for field, value in filters:
+                if not _FIELD_NAME_RE.match(field):
+                    raise GraphAPIError(
+                        400,
+                        f"Nombre de campo inválido: {field!r}. Debe ser el nombre "
+                        "interno de la columna (solo letras, dígitos y '_').",
+                    )
+                expected, label = _search_field_expected_type(columns, field)
+                _check_search_value_type(field, value, expected, label)
+                clauses.append(f"fields/{field} eq {_to_odata_literal(value)}")
+
+        params = ["$expand=fields", f"$top={top}"]
+        if clauses:
+            params.append("$filter=" + quote(" and ".join(clauses), safe=""))
+        if order_by:
+            ob_field, direction = order_by
+            if not _FIELD_NAME_RE.match(ob_field):
+                raise GraphAPIError(
+                    400,
+                    f"Nombre de campo inválido en order_by: {ob_field!r}. Debe ser "
+                    "el nombre interno de la columna (solo letras, dígitos y '_').",
+                )
+            if direction not in ("asc", "desc"):
+                raise GraphAPIError(
+                    400, f"Dirección de orden inválida: {direction!r} (asc|desc)."
+                )
+            params.append("$orderby=" + quote(f"fields/{ob_field} {direction}", safe=""))
+
+        url = f"{GRAPH}/sites/{site_id}/lists/{list_id}/items?" + "&".join(params)
+        items, has_more = await self._get_bounded(
+            url,
+            top,
+            extra_headers={"Prefer": "HonorNonIndexedQueriesWarningMayFailRandomly"},
+        )
+        logger.info(
+            "Search on list %s: %d filter(s), top=%d → %d item(s), has_more=%s",
+            list_id,
+            len(clauses),
+            top,
+            len(items),
+            has_more,
+            extra={**_ctx(), "site_id": site_id, "list_id": list_id},
+        )
+        return items, has_more
 
     async def update_list_item(
         self, site_id: str, list_id: str, item_id: str, fields: dict

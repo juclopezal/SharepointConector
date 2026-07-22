@@ -169,6 +169,111 @@ class UpsertListItemResponse(BaseModel):
     )
 
 
+class SearchFilter(BaseModel):
+    """Una condición de igualdad ``campo = valor`` de la búsqueda de ítems."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9_]+$",
+        description=(
+            "Nombre interno (internal name) de la columna a filtrar. Solo letras, "
+            "dígitos y '_'. Las columnas lookup se filtran con su campo "
+            "'{Columna}LookupId' (valor entero)."
+        ),
+    )
+    value: str | bool | int | float = Field(
+        ...,
+        description=(
+            "Valor exacto a comparar, en su tipo JSON natural: string, boolean "
+            "(true/false, sin comillas), entero o decimal. El conector traduce el "
+            "valor al literal OData correcto; el tipo debe corresponder al de la "
+            "columna (se valida contra el esquema real de la lista)."
+        ),
+    )
+
+
+class OrderBy(BaseModel):
+    """Ordenación opcional de la búsqueda (``$orderby`` de Graph)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9_]+$",
+        description=(
+            "Nombre interno de la columna por la que ordenar. En listas grandes "
+            "(por encima del umbral de vista de SharePoint) Graph solo permite "
+            "ordenar por columnas indexadas (p. ej. 'Created', 'Modified', 'ID')."
+        ),
+    )
+    direction: Literal["asc", "desc"] = Field(
+        default="asc",
+        description="Sentido de la ordenación: 'asc' (por defecto) o 'desc'.",
+    )
+
+
+class ListItemsSearchByUrlRequest(BaseModel):
+    """Body de ``POST /v1/sharepoint/list/items:search``.
+
+    ``extra="forbid"``: cualquier campo desconocido (p. ej. un ``filter_by`` de
+    otros endpoints) se rechaza con 422 en lugar de ignorarse en silencio.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sharepoint_url: str = Field(
+        ...,
+        description=(
+            "URL de la lista tal como aparece en el navegador, p. ej. "
+            "https://host.sharepoint.com/sitio/Lists/MiLista/AllItems.aspx"
+        ),
+    )
+    filters: list[SearchFilter] | None = Field(
+        default=None,
+        max_length=15,
+        description=(
+            "Hasta 15 condiciones combinadas con AND. Omitido o vacío → se "
+            "devuelven los primeros `top` ítems sin filtrar."
+        ),
+    )
+    order_by: OrderBy | None = Field(
+        default=None,
+        description="Ordenación opcional del resultado.",
+    )
+    top: int = Field(
+        default=100,
+        ge=1,
+        le=5000,
+        description=(
+            "Número máximo de ítems a devolver (1–5000). El conector sigue la "
+            "paginación de Graph hasta reunirlos y trunca el excedente."
+        ),
+    )
+
+
+class ListItemsSearchByUrlItem(BaseModel):
+    id: str
+    webUrl: str | None = None
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class ListItemsSearchByUrlResponse(BaseModel):
+    total: int = Field(
+        description="Número de ítems devueltos (tras el truncado por `top`)."
+    )
+    items: list[ListItemsSearchByUrlItem]
+    has_more: bool = Field(
+        default=False,
+        description=(
+            "true si el corte por `top` dejó fuera filas que también coincidían."
+        ),
+    )
+    site_id: str
+    list_id: str
+
+
 class UploadByUrlResponse(BaseModel):
     status: str = "uploaded"
     id: str

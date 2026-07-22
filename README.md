@@ -2,7 +2,7 @@
 
 Microservicio REST que reemplaza Power Automate para operaciones sobre SharePoint vía Microsoft Graph API. Expone una API genérica y versionada que opera sobre cualquier site, lista y biblioteca de documentos de forma dinámica.
 
-**Versión actual:** 2.3.0
+**Versión actual:** 2.4.0
 
 ---
 
@@ -22,6 +22,7 @@ Ver [ARQUITECTURA.md](ARQUITECTURA.md) para la referencia completa.
 | `POST` | `/v1/sharepoint/list/item` | Inserta un ítem en una lista identificada por su URL |
 | `PATCH` | `/v1/sharepoint/list/item` | Actualiza un ítem localizándolo por un campo único (`filter_by`) |
 | `POST` | `/v1/sharepoint/list/item:upsert` | Inserta o actualiza un ítem según coincidencia por clave (+ periodo opcional) |
+| `POST` | `/v1/sharepoint/list/items:search` | Busca ítems con hasta 15 filtros multi-campo (AND), validados contra el esquema de la lista |
 | `POST` | `/v1/sharepoint/upload` | Sube un archivo a una biblioteca/carpeta identificada por su URL (`multipart/form-data`) |
 
 ### Discovery
@@ -51,7 +52,7 @@ Ver [ARQUITECTURA.md](ARQUITECTURA.md) para la referencia completa.
 ### Health
 
 ```
-GET /health  →  { "status": "ok", "service": "SharePoint Connector", "version": "2.3.0" }
+GET /health  →  { "status": "ok", "service": "SharePoint Connector", "version": "2.4.0" }
 ```
 
 ---
@@ -132,6 +133,47 @@ curl -X POST "http://localhost:8003/v1/sharepoint/list/item:upsert" \
 La respuesta indica `result: "created"` o `"updated"`, con `id`, `site_id`,
 `list_id` y `matched` (nº de coincidencias). Ante varias coincidencias se actualiza
 la **primera** y se registra un `warning` (no es error).
+
+### Buscar ítems de una lista
+
+Búsqueda con hasta 15 condiciones de igualdad combinadas con **AND**. Cada valor
+viaja en su tipo JSON natural (string, boolean sin comillas, número) y se valida
+contra el esquema real de la lista antes de consultar Graph:
+
+```bash
+curl -X POST "http://localhost:8003/v1/sharepoint/list/items:search" \
+  -H "Content-Type: application/json" \
+  -H "X-App-ID: mi-app" \
+  -d '{
+    "sharepoint_url": "https://latinia2com-portal8.sharepoint.com/Oper/Lists/DSL/Allitemsg.aspx",
+    "filters": [
+      { "field": "Entorno", "value": "L02" },
+      { "field": "_x00da_ltima", "value": true }
+    ],
+    "top": 100
+  }'
+```
+
+- `filters` (opcional, hasta 15): condiciones `{field, value}` con nombres
+  **internos** de columna. Omitido o `[]` → se devuelven los primeros `top` ítems
+  sin filtrar. Campo inexistente o tipo que no corresponde a la columna → `400`
+  explícito (nunca una cláusula ignorada en silencio). Cualquier campo desconocido
+  en el body → `422`.
+- **Booleanos**: se envían como `true`/`false` JSON (sin comillas). Internamente el
+  conector los traduce al literal OData `1`/`0` — Graph **ignora en silencio**
+  `eq true|false` sobre columnas Sí/No (devuelve todas las filas sin error); con
+  `1`/`0` sí filtra (verificado empíricamente contra la lista DSL).
+- **Columnas lookup**: se filtran por su campo `{Columna}LookupId` con el ID
+  numérico (p. ej. `Cliente_x002d_LIBSALookupId`); filtrar por la columna base da `400`.
+- `order_by` (opcional): `{ "field": "...", "direction": "asc"|"desc" }`. En listas
+  que superan el **umbral de vista** de SharePoint (~5000 filas), Graph rechaza
+  ordenar por columnas no indexadas (`notSupported`, error propagado con detalle);
+  usa columnas indexadas como `Created`, `Modified` o `ID`.
+- `top` (1–5000, default 100): acota el resultado siguiendo la paginación de Graph;
+  la respuesta incluye `has_more` si quedaron coincidencias fuera del corte.
+
+Respuesta: `{ total, items[{id, webUrl, fields}], has_more, site_id, list_id }`.
+0 coincidencias → `200` con `total: 0`.
 
 ### Subir un archivo
 

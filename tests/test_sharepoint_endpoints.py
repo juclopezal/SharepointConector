@@ -434,3 +434,208 @@ def test_upsert_invalid_key_field_returns_422(wired_client):
     )
 
     assert resp.status_code == 422
+
+
+# ----------------------------------------------------------------------
+# POST /v1/sharepoint/list/items:search
+# ----------------------------------------------------------------------
+
+_SEARCH_URL = "/v1/sharepoint/list/items:search"
+_LIST_URL = "https://host/Oper/Lists/DSL/Allitemsg.aspx"
+
+
+def test_search_endpoint_present_in_openapi():
+    assert "/v1/sharepoint/list/items:search" in app.openapi()["paths"]
+
+
+def test_search_round_trip(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+        received.update(
+            site_id=site_id, list_id=list_id, filters=filters, order_by=order_by, top=top
+        )
+        return (
+            [
+                {"id": "7", "webUrl": "https://host/item/7",
+                 "fields": {"Entorno": "L02", "_x00da_ltima": True}},
+            ],
+            True,
+        )
+
+    fake_sp.search_list_items = fake_search
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={
+            "sharepoint_url": _LIST_URL,
+            "filters": [
+                {"field": "Entorno", "value": "L02"},
+                {"field": "_x00da_ltima", "value": True},
+            ],
+            "top": 100,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "total": 1,
+        "items": [
+            {
+                "id": "7",
+                "webUrl": "https://host/item/7",
+                "fields": {"Entorno": "L02", "_x00da_ltima": True},
+            }
+        ],
+        "has_more": True,
+        "site_id": "SITE",
+        "list_id": "LIST",
+    }
+    # los filtros llegan al servicio tipados: el booleano sigue siendo bool
+    assert received["filters"] == [("Entorno", "L02"), ("_x00da_ltima", True)]
+    assert isinstance(received["filters"][1][1], bool)
+    assert received["top"] == 100
+
+
+def test_search_without_filters_passes_none(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+        received.update(filters=filters, top=top)
+        return [], False
+
+    fake_sp.search_list_items = fake_search
+
+    resp = client.post(_SEARCH_URL, json={"sharepoint_url": _LIST_URL})
+
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+    assert received["filters"] is None
+    assert received["top"] == 100  # default
+
+
+def test_search_empty_filters_array_equals_omitted(wired_client):
+    # "filters": [] explícito NO es 422: equivale a omitir el campo
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+        received.update(filters=filters)
+        return [], False
+
+    fake_sp.search_list_items = fake_search
+
+    resp = client.post(
+        _SEARCH_URL, json={"sharepoint_url": _LIST_URL, "filters": []}
+    )
+
+    assert resp.status_code == 200
+    assert received["filters"] is None
+
+
+def test_search_order_by_passed_as_tuple(wired_client):
+    client, fake_sp, fake_resolver = wired_client
+    received = {}
+
+    fake_resolver.resolve_list = _resolve_list
+
+    async def fake_search(site_id, list_id, *, filters=None, order_by=None, top=100):
+        received.update(order_by=order_by)
+        return [], False
+
+    fake_sp.search_list_items = fake_search
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={
+            "sharepoint_url": _LIST_URL,
+            "order_by": {"field": "Created", "direction": "desc"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert received["order_by"] == ("Created", "desc")
+
+
+def test_search_unknown_body_field_returns_422(wired_client):
+    # extra="forbid": un filter_by heredado de otros endpoints no se ignora
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={
+            "sharepoint_url": _LIST_URL,
+            "filter_by": {"field": "Entorno", "value": "L02"},
+        },
+    )
+
+    assert resp.status_code == 422
+
+
+def test_search_more_than_15_filters_returns_422(wired_client):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={
+            "sharepoint_url": _LIST_URL,
+            "filters": [{"field": f"F{i}", "value": "x"} for i in range(16)],
+        },
+    )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("bad_value", [None, {"a": 1}, [1, 2]])
+def test_search_unsupported_value_type_returns_422(wired_client, bad_value):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={
+            "sharepoint_url": _LIST_URL,
+            "filters": [{"field": "Entorno", "value": bad_value}],
+        },
+    )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("bad_field", ["Title eq 'x'", "fields/Other", "a-b", ""])
+def test_search_invalid_filter_field_returns_422(wired_client, bad_field):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL,
+        json={
+            "sharepoint_url": _LIST_URL,
+            "filters": [{"field": bad_field, "value": "x"}],
+        },
+    )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("bad_top", [0, -1, 5001])
+def test_search_top_out_of_range_returns_422(wired_client, bad_top):
+    client, _, fake_resolver = wired_client
+    fake_resolver.resolve_list = _resolve_list
+
+    resp = client.post(
+        _SEARCH_URL, json={"sharepoint_url": _LIST_URL, "top": bad_top}
+    )
+
+    assert resp.status_code == 422
